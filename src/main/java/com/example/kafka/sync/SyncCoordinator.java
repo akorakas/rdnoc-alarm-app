@@ -2,11 +2,11 @@ package com.example.kafka.sync;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import com.example.kafka.kafka.InputListener;
 import com.example.kafka.kafka.KafkaListenerController;
 import com.example.kafka.nsp.NspRestPoller;
 import com.example.kafka.service.sync.SyncMarkerFactory;
@@ -25,81 +25,83 @@ public class SyncCoordinator {
   private final SyncMarkerFactory syncMarkerFactory;
   private final SinkRouter sinks;
 
-  private final ReentrantLock lock = new ReentrantLock();
+  // Prevent overlapping syncs (startup + scheduler, or slow REST call)
+  private final AtomicBoolean running = new AtomicBoolean(false);
 
-  @Value("${app.sync.enabled:true}")
-  private boolean syncEnabled;
-
-  @Value("${app.sync.skip-if-running:true}")
-  private boolean skipIfRunning;
-
-  @Value("${app.inputs.kafka.enabled:true}")
-  private boolean kafkaEnabled;
-
-  @Value("${app.inputs.rest.enabled:true}")
-  private boolean restEnabled;
-
+  /**
+   * Execute a full sync flow:
+   *  1) pause kafka listener (if running)
+   *  2) send SYNC_START
+   *  3) fetch+publish snapshot via REST
+   *  4) send SYNC_END
+   *  5) resume/start kafka listener
+   */
   public void runSync(String reason) {
-    if (!syncEnabled) {
-      log.info("Sync disabled; skipping. reason={}", reason);
-      return;
-    }
-    if (!restEnabled) {
-      log.warn("REST input disabled; skipping sync. reason={}", reason);
+    if (!running.compareAndSet(false, true)) {
+      log.warn("Sync already running; skip. reason={}", reason);
       return;
     }
 
-    boolean acquired = lock.tryLock();
-    if (!acquired) {
-      if (skipIfRunning) {
-        log.warn("Sync already running; skipping. reason={}", reason);
-        return;
-      }
-      lock.lock();
-    }
+    Map<String, String> headers = new HashMap<>();
+    headers.put("source", "SYNC");
+    headers.put("reason", reason);
+
+    final String listenerId = InputListener.LISTENER_ID;
 
     boolean kafkaWasRunning = false;
 
     try {
-      kafkaWasRunning = kafkaEnabled && kafkaController.isRunning();
+      kafkaWasRunning = kafkaController.isRunning(listenerId);
 
+      // 1) Pause Kafka listener (only if it was running)
       if (kafkaWasRunning) {
-        log.info("Pausing Kafka listener before sync. reason={}", reason);
-        kafkaController.pause();
+        log.info("Sync: pausing kafka listener id={}", listenerId);
+        kafkaController.pause(listenerId);
       } else {
-        log.info("Kafka listener not running (or disabled); sync will proceed. reason={}", reason);
+        log.info("Sync: kafka listener not running; will sync before starting it. id={}", listenerId);
       }
 
-      // SYNC_START marker
-      sendMarker(syncMarkerFactory.buildSyncStart(), "SYNC_START");
+      // 2) SYNC_START marker (best-effort)
+      try {
+        String syncStart = syncMarkerFactory.buildSyncStart();
+        sinks.sendOutput(null, syncStart, headers);
+        log.info("Sync: sent SYNC_START");
+      } catch (Exception e) {
+        log.error("Sync: failed to build/send SYNC_START", e);
+      }
 
-      // REST snapshot alarms (transform & publish)
-      restPoller.fetchAndPublishActiveAlarmsOnce();
+      // 3) Snapshot publish (may throw checked Exception)
+      try {
+        restPoller.fetchAndPublishActiveAlarmsOnce();
+        log.info("Sync: snapshot published successfully");
+      } catch (Exception e) {
+        log.error("Sync: snapshot fetch/publish failed. reason={}", reason, e);
+      }
 
-      // SYNC_END marker
-      sendMarker(syncMarkerFactory.buildSyncEnd(), "SYNC_END");
-
-      log.info("Sync completed successfully. reason={}", reason);
-
-    } catch (Exception e) {
-      log.error("Sync failed. reason={}", reason, e);
-      throw e;
+      // 4) SYNC_END marker (best-effort)
+      try {
+        String syncEnd = syncMarkerFactory.buildSyncEnd();
+        sinks.sendOutput(null, syncEnd, headers);
+        log.info("Sync: sent SYNC_END");
+      } catch (Exception e) {
+        log.error("Sync: failed to build/send SYNC_END", e);
+      }
 
     } finally {
+      // 5) Resume OR start Kafka listener
       try {
         if (kafkaWasRunning) {
-          log.info("Resuming Kafka listener after sync. reason={}", reason);
-          kafkaController.resume();
+          log.info("Sync: resuming kafka listener id={}", listenerId);
+          kafkaController.resume(listenerId);
+        } else {
+          log.info("Sync: starting kafka listener id={} (startup behavior)", listenerId);
+          kafkaController.start(listenerId);
         }
+      } catch (Exception e) {
+        log.error("Sync: failed to resume/start kafka listener id={}", listenerId, e);
       } finally {
-        lock.unlock();
+        running.set(false);
       }
     }
-  }
-
-  private void sendMarker(String markerJson, String markerType) {
-    Map<String, String> headers = new HashMap<>();
-    headers.put("sync-marker", markerType);
-    sinks.sendOutput(null, markerJson, headers);
   }
 }
