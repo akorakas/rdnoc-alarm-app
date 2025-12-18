@@ -27,7 +27,7 @@ USER app
 WORKDIR /app
 
 # copy boot fat jar from the build stage
-COPY --from=build /workspace/target/kafka-application-0.0.1-SNAPSHOT.jar /app/app.jar
+COPY --from=build /workspace/target/rdnoc-alarm-app-0.0.1-SNAPSHOT.jar /app/app.jar
 
 # Optional: Drop in a default config dir (you can mount your own at runtime)
 # COPY src/main/resources/application.yml /app/config/application.yml

@@ -12,10 +12,10 @@
   </parent>
 
   <groupId>com.example</groupId>
-  <artifactId>kafka-application</artifactId>
+  <artifactId>rdnoc-alarm-app</artifactId>
   <version>0.0.1-SNAPSHOT</version>
-  <name>kafka-application</name>
-  <description>Kafka consume-transform-produce</description>
+  <name>rdnoc-alarm-app</name>
+  <description>RDNOC alarm app: REST snapshot sync + Kafka streaming</description>
 
   <properties>
     <java.version>21</java.version>

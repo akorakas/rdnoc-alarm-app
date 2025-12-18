@@ -9,7 +9,6 @@ import org.springframework.stereotype.Component;
 import com.example.kafka.service.config.SinksProperties;
 
 @Component
-@EnableConfigurationProperties(SinksProperties.class)
 public class SinkRouter {
 
   private final ChannelSender outputSender;

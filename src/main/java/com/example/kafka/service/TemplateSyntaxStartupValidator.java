@@ -1,5 +1,7 @@
 package com.example.kafka.service;
 
+import java.util.List;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -18,7 +20,8 @@ public class TemplateSyntaxStartupValidator implements ApplicationRunner {
 
   public TemplateSyntaxStartupValidator(
       TransformProperties props,
-      @Value("${transform.validate-template-on-start:true}") boolean enabled) {
+      @Value("${transform.validate-on-start:true}") boolean enabled   // ✅ align with YAML
+  ) {
     this.props = props;
     this.enabled = enabled;
   }
@@ -27,33 +30,33 @@ public class TemplateSyntaxStartupValidator implements ApplicationRunner {
   public void run(ApplicationArguments args) {
     if (!enabled) return;
 
-    if (props.getPipeline() == null || props.getPipeline().isEmpty()) {
-      // Nothing to validate
-      return;
-    }
+    validatePipeline("kafka", props.getKafka() != null ? props.getKafka().getPipeline() : null);
+    validatePipeline("rest",  props.getRest()  != null ? props.getRest().getPipeline()  : null);
+  }
+
+  private void validatePipeline(String name, List<TransformProperties.Step> pipeline) {
+    if (pipeline == null || pipeline.isEmpty()) return;
 
     int idx = 0;
-    for (var step : props.getPipeline()) {
+    for (var step : pipeline) {
       idx++;
       if (!"template".equals(step.getType())) continue;
 
       String tpl = step.getTemplate();
       if (tpl == null || tpl.isBlank()) {
-        throw new IllegalStateException("Startup validation failed: template step #" + idx + " has empty template.");
+        throw new IllegalStateException("Startup validation failed: [" + name + "] template step #" + idx + " has empty template.");
       }
 
-      // Replace ${...} placeholders with a JSON-safe literal so we can parse structure.
-      // Using "0" works for both quoted and unquoted positions.
       String renderedForCheck = tpl.replaceAll("\\$\\{[^}]+\\}", "0");
 
       try {
-        M.readTree(renderedForCheck); // must parse as JSON
+        M.readTree(renderedForCheck);
       } catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
         String preview = renderedForCheck.length() > 400
             ? renderedForCheck.substring(0, 400) + "...(truncated)"
             : renderedForCheck;
         throw new IllegalStateException(
-            "Startup validation failed: template step #" + idx + " is not valid JSON after placeholder substitution.\n"
+            "Startup validation failed: [" + name + "] template step #" + idx + " is not valid JSON after placeholder substitution.\n"
           + "Preview:\n" + preview, ex);
       }
     }
