@@ -12,21 +12,21 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class SyncScheduler {
+public class SubscriptionRenewScheduler {
 
   private final NspSubscriptionManager manager;
 
-  @Value("${app.sync.enabled:true}")
-  private boolean syncEnabled;
+  @Value("${app.nsp.subscription.renew-enabled:true}")
+  private boolean enabled;
 
   @Scheduled(
-      fixedDelayString = "${app.sync.fixed-delay-ms:60000}",
-      initialDelayString = "${app.sync.initial-delay-ms:0}"
+      fixedDelayString = "${app.nsp.subscription.renew-fixed-delay-ms:1200000}",
+      initialDelayString = "${app.nsp.subscription.renew-initial-delay-ms:0}"
   )
-  public void scheduledSync() {
-    if (!syncEnabled) return;
+  public void renew() {
+    if (!enabled) return;
 
-    // IMPORTANT: go through manager so it pauses/resumes consumer and avoids overlap
-    manager.runPeriodicSync("scheduled");
+    // renewOrRecreate() already handles failures internally + recreate if needed
+    manager.renewOrRecreate();
   }
 }
