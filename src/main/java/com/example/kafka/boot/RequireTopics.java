@@ -36,7 +36,6 @@ public class RequireTopics {
   @Bean
   @Qualifier("inputAdminClient")
   public AdminClient inputAdminClient(KafkaProperties props) {
-    // Uses consumer-side bootstrap-servers + security (Option A)
     Map<String, Object> cfg = new HashMap<>(props.buildConsumerProperties(null));
     return AdminClient.create(cfg);
   }
@@ -45,7 +44,6 @@ public class RequireTopics {
   @Bean
   @Qualifier("outputAdminClient")
   public AdminClient outputAdminClient(KafkaProperties props) {
-    // Uses producer-side bootstrap-servers + security (Option A)
     Map<String, Object> cfg = new HashMap<>(props.buildProducerProperties(null));
     return AdminClient.create(cfg);
   }
@@ -53,16 +51,26 @@ public class RequireTopics {
   /**
    * On startup:
    *  1) Check connectivity/auth to both clusters
-   *  2) Verify input topic on INPUT cluster
-   *  3) Verify sink topics (only kafka-type) on OUTPUT cluster
-   *  4) Start listener containers
+   *  2) (Optional) Verify input topic on INPUT cluster (static mode only)
+   *  3) Verify sink topics (kafka-type only) on OUTPUT cluster
+   *  4) (Optional) Start @KafkaListener containers
+   *
+   * In dynamic NSP-subscription mode, the input topic is created at runtime,
+   * so we typically skip step (2) and do not start the registry.
    */
   @Bean
   public ApplicationRunner verifyAllTopics(
       @Qualifier("inputAdminClient")  AdminClient inputAdmin,
       @Qualifier("outputAdminClient") AdminClient outputAdmin,
       KafkaListenerEndpointRegistry registry,
-      @Value("${app.kafka.input-topic}") String inputTopic,
+
+      // Optional: might be absent in dynamic mode
+      @Value("${app.kafka.input-topic:}") String inputTopic,
+
+      // Flags
+      @Value("${app.kafka.verify-input-topic:true}") boolean verifyInputTopic,
+      @Value("${app.kafka.start-listeners-after-verify:false}") boolean startListenersAfterVerify,
+
       SinksProperties sinksProps,
       @Value("${app.kafka.verify-timeout-sec:10}") int verifyTimeoutSec
   ) {
@@ -75,9 +83,14 @@ public class RequireTopics {
       verifyClusterReachable(inputAdmin,  verifyTimeoutSec, "INPUT");
       verifyClusterReachable(outputAdmin, verifyTimeoutSec, "OUTPUT");
 
-      // 2) Verify input topic on INPUT cluster
-      var requiredInput = Set.of(trimOrNull(inputTopic));
-      verifyTopicsExist(inputAdmin, requiredInput, verifyTimeoutSec, "INPUT");
+      // 2) Verify input topic on INPUT cluster (only if enabled AND configured)
+      String input = trimOrNull(inputTopic);
+      if (verifyInputTopic && input != null && !input.isBlank()) {
+        verifyTopicsExist(inputAdmin, Set.of(input), verifyTimeoutSec, "INPUT");
+      } else {
+        log.info("[INPUT] Skipping input topic verification (verifyInputTopic={}, inputTopic='{}')",
+            verifyInputTopic, inputTopic);
+      }
 
       // 3) Verify sink topics (kafka-only) on OUTPUT cluster
       Set<String> requiredOutput = new LinkedHashSet<>();
@@ -92,9 +105,13 @@ public class RequireTopics {
         log.info("No OUTPUT topics to verify (all sinks are file-based or unset).");
       }
 
-      // 4) Start Kafka listeners after successful verification
-      registry.start();
-      log.info("Kafka listeners started after topic verification.");
+      // 4) Optional start listener containers (only if you still use @KafkaListener)
+      if (startListenersAfterVerify) {
+        registry.start();
+        log.info("Kafka listeners started after topic verification.");
+      } else {
+        log.info("Kafka listener registry not started (start-listeners-after-verify=false).");
+      }
     };
   }
 
