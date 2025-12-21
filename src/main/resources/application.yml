@@ -29,26 +29,10 @@ app:
     rest:
       enabled: true
 
-  # Kafka-related bootstrap checks (RequireTopics)
   kafka:
-    # We do NOT have a fixed input topic anymore (dynamic NSP subscription topic),
-    # so keep this false.
     mode: dynamic
-
-    # mode: static
-    # input-topic: snmp-traps
-
     verify-input-topic: false
-
-    # Optional. If you ever enable verify-input-topic=true, then app.kafka.input-topic
-    # must be set (or will default depending on code).
-    # input-topic: snmp-traps
-
     verify-timeout-sec: 10
-
-    # IMPORTANT:
-    # DynamicKafkaConsumer / NspSubscriptionManager controls consumer start.
-    # So RequireTopics should NOT start listener registry automatically.
     start-listeners-after-verify: false
 
   sync:
@@ -109,7 +93,6 @@ app:
 
 spring:
   kafka:
-    # --------------------------- Consumer (INPUT cluster) ---------------------
     consumer:
       bootstrap-servers: 172.17.52.133:9192
       group-id: apo07
@@ -133,7 +116,6 @@ spring:
         "[ssl.truststore.password]": "NokiaNsp1!trust"
         "[ssl.truststore.type]": JKS
 
-    # --------------------------- Producer (OUTPUT cluster) ---------------------
     producer:
       bootstrap-servers: atlas-dev.tmn.ote.gr:32100
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -159,15 +141,12 @@ spring:
         "[max.block.ms]": 5000
         "[allow.auto.create.topics]": false
 
-    # Listener container (won't autostart)
     listener:
       concurrency: 1
       ack-mode: BATCH
       auto-startup: false
       missing-topics-fatal: true
 
-    # --------------------------- Admin (INPUT cluster) -------------------------
-    # CRITICAL: This is what your NspSubscriptionManager.topicExists() uses
     admin:
       fail-fast: true
       bootstrap-servers: 172.17.52.133:9192
@@ -186,16 +165,19 @@ transform:
 
   kafka:
     pipeline:
+      # ✅ Make alarm-change OPTIONAL because the topic can contain other message types too
       - type: extract
-        failOnMissing: true
+        failOnMissing: false
         failOnBadJson: true
         mappings:
           sourceEvent: "/"
           alarmNode: "data.ietf-restconf:notification.nsp-fault:alarm-change"
+          alarmDeleteNode: "data.ietf-restconf:notification.nsp-fault:alarm-delete"
 
+      # ✅ Do not hard-fail if alarmNode is missing (non alarm-change messages)
       - type: extract
         fromVar: alarmNode
-        failOnMissing: true
+        failOnMissing: false
         failOnBadJson: true
         mappings:
           emsDomain: "/sourceType"
@@ -207,9 +189,9 @@ transform:
           probableCause: "/probableCause"
           alarmType: "/alarmType"
           impact: "/impact"
-          serviceAffecting: "/serviceAffecting"
           objectFullName: "/objectFullName"
 
+      # ✅ Optional fields (includes serviceAffecting now)
       - type: extract
         fromVar: alarmNode
         failOnMissing: false
@@ -219,6 +201,7 @@ transform:
           timestampRaw: "/lastTimeDetected"
           severityNew: "severity.new-value"
           severityRaw: "/severity"
+          serviceAffecting: "/serviceAffecting"
 
       - type: extract
         fromVar: alarmNode
@@ -228,24 +211,27 @@ transform:
           fdn: "/fdn"
           objectId: "/objectId"
 
-      - type: extract
-        failOnMissing: false
-        failOnBadJson: false
-        mappings:
-          nspFaultAlarmDelete: "data.ietf-restconf:notification.nsp-fault:alarm-delete"
-
       - type: update
         compute:
           - set: severity
             expr: "UPPER(COALESCE(severityNew, severityRaw))"
+
+          # ✅ include alarmDeleteNode as a CLEAR trigger
           - set: type
-            expr: "severity == 'CLEARED' ? 'CLEAR' : (nspFaultAlarmDelete != null ? 'CLEAR' : (fdn != null ? 'FAULT_SYNC' : (objectId != null ? 'FAULT' : 'UNKNOWN')))"
+            expr: "severity == 'CLEARED' ? 'CLEAR' : ((alarmDeleteNode != null) ? 'CLEAR' : (fdn != null ? 'FAULT_SYNC' : (objectId != null ? 'FAULT' : 'UNKNOWN')))"
+
           - set: timestamp
             expr: "timestampNew != null ? timestampNew : timestampRaw"
+
           - set: emsDomainNormalized
             expr: "emsDomain == 'IP' ? 'IP' : (emsDomain == 'TRANSPORT' ? 'TRANSPORT' : 'UNKNOWN')"
+
           - set: alarmIdentifier
             expr: "objectFullName"
+
+          # ✅ default serviceAffecting when missing
+          - set: serviceAffectingSafe
+            expr: "serviceAffecting == true ? 'true' : 'false'"
 
       - type: template
         target: "$"
@@ -270,7 +256,7 @@ transform:
               "probableCause": "${probableCause}",
               "alarmType": "${alarmType}",
               "impact": ${impact},
-              "serviceAffecting": ${serviceAffecting},
+              "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
             "enrichedData": null,
