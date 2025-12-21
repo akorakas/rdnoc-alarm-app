@@ -33,6 +33,11 @@ app:
   kafka:
     # We do NOT have a fixed input topic anymore (dynamic NSP subscription topic),
     # so keep this false.
+    mode: dynamic
+
+    # mode: static
+    # input-topic: snmp-traps
+
     verify-input-topic: false
 
     # Optional. If you ever enable verify-input-topic=true, then app.kafka.input-topic
