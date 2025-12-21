@@ -68,7 +68,7 @@ public class RequireTopics {
       @Value("${app.kafka.input-topic:}") String inputTopic,
 
       // Flags
-      @Value("${app.kafka.verify-input-topic:true}") boolean verifyInputTopic,
+      @Value("${app.kafka.verify-input-topic:false}") boolean verifyInputTopic,
       @Value("${app.kafka.start-listeners-after-verify:false}") boolean startListenersAfterVerify,
 
       SinksProperties sinksProps,
@@ -85,11 +85,13 @@ public class RequireTopics {
 
       // 2) Verify input topic on INPUT cluster (only if enabled AND configured)
       String input = trimOrNull(inputTopic);
-      if (verifyInputTopic && input != null && !input.isBlank()) {
+      if (verifyInputTopic) {
+        if (input == null || input.isBlank()) {
+          throw new IllegalStateException("[INPUT] verify-input-topic=true but app.kafka.input-topic is empty.");
+        }
         verifyTopicsExist(inputAdmin, Set.of(input), verifyTimeoutSec, "INPUT");
       } else {
-        log.info("[INPUT] Skipping input topic verification (verifyInputTopic={}, inputTopic='{}')",
-            verifyInputTopic, inputTopic);
+        log.info("[INPUT] Skipping input topic verification (verifyInputTopic=false, inputTopic='{}')", inputTopic);
       }
 
       // 3) Verify sink topics (kafka-only) on OUTPUT cluster
