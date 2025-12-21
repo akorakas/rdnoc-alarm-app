@@ -48,23 +48,16 @@ public class RequireTopics {
     return AdminClient.create(cfg);
   }
 
-  /**
-   * On startup:
-   *  1) Check connectivity/auth to both clusters
-   *  2) (Optional) Verify input topic on INPUT cluster (static mode only)
-   *  3) Verify sink topics (kafka-type only) on OUTPUT cluster
-   *  4) (Optional) Start @KafkaListener containers
-   *
-   * In dynamic NSP-subscription mode, the input topic is created at runtime,
-   * so we typically skip step (2) and do not start the registry.
-   */
   @Bean
   public ApplicationRunner verifyAllTopics(
       @Qualifier("inputAdminClient")  AdminClient inputAdmin,
       @Qualifier("outputAdminClient") AdminClient outputAdmin,
       KafkaListenerEndpointRegistry registry,
 
-      // Optional: might be absent in dynamic mode
+      // NEW: mode static|dynamic
+      @Value("${app.kafka.mode:dynamic}") String kafkaMode,
+
+      // Optional: only relevant in static mode
       @Value("${app.kafka.input-topic:}") String inputTopic,
 
       // Flags
@@ -79,19 +72,32 @@ public class RequireTopics {
         log.debug("Startup args: {}", Arrays.toString(args.getSourceArgs()));
       }
 
+      final String mode = trimOrNull(kafkaMode);
+      final boolean isStatic = "static".equalsIgnoreCase(mode);
+      final boolean isDynamic = !isStatic; // default dynamic
+
       // 1) Verify both clusters are reachable
       verifyClusterReachable(inputAdmin,  verifyTimeoutSec, "INPUT");
       verifyClusterReachable(outputAdmin, verifyTimeoutSec, "OUTPUT");
 
-      // 2) Verify input topic on INPUT cluster (only if enabled AND configured)
+      // 2) Input topic rules:
+      //    - dynamic: topic comes from NSP subscription -> do NOT require/verify app.kafka.input-topic
+      //    - static : app.kafka.input-topic MUST be set; optionally verify existence
       String input = trimOrNull(inputTopic);
-      if (verifyInputTopic) {
-        if (input == null || input.isBlank()) {
-          throw new IllegalStateException("[INPUT] verify-input-topic=true but app.kafka.input-topic is empty.");
-        }
-        verifyTopicsExist(inputAdmin, Set.of(input), verifyTimeoutSec, "INPUT");
+
+      if (isDynamic) {
+        log.info("[INPUT] app.kafka.mode={} -> skipping input-topic verification (topic created at runtime).", mode);
       } else {
-        log.info("[INPUT] Skipping input topic verification (verifyInputTopic=false, inputTopic='{}')", inputTopic);
+        // static mode
+        if (input == null || input.isBlank()) {
+          throw new IllegalStateException("[INPUT] app.kafka.mode=static but app.kafka.input-topic is empty.");
+        }
+
+        if (verifyInputTopic) {
+          verifyTopicsExist(inputAdmin, Set.of(input), verifyTimeoutSec, "INPUT");
+        } else {
+          log.info("[INPUT] Static mode: input-topic='{}' set, but verify-input-topic=false so topic existence won't be checked.", input);
+        }
       }
 
       // 3) Verify sink topics (kafka-only) on OUTPUT cluster
@@ -107,12 +113,14 @@ public class RequireTopics {
         log.info("No OUTPUT topics to verify (all sinks are file-based or unset).");
       }
 
-      // 4) Optional start listener containers (only if you still use @KafkaListener)
-      if (startListenersAfterVerify) {
+      // 4) Optional start listener containers
+      // In dynamic mode you typically do NOT want to start @KafkaListener registry
+      if (startListenersAfterVerify && isStatic) {
         registry.start();
-        log.info("Kafka listeners started after topic verification.");
+        log.info("Kafka listeners started after topic verification (static mode).");
       } else {
-        log.info("Kafka listener registry not started (start-listeners-after-verify=false).");
+        log.info("Kafka listener registry not started (start-listeners-after-verify={}, mode={}).",
+            startListenersAfterVerify, mode);
       }
     };
   }

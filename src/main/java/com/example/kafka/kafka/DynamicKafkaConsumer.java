@@ -1,3 +1,4 @@
+// src/main/java/com/example/kafka/kafka/DynamicKafkaConsumer.java
 package com.example.kafka.kafka;
 
 import java.util.HashMap;
@@ -6,6 +7,7 @@ import java.util.Objects;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
 import org.springframework.kafka.listener.ContainerProperties;
@@ -26,17 +28,33 @@ public class DynamicKafkaConsumer {
   private final Transformer transformer;
   private final SinkRouter sinks;
 
+  // ✅ read from YAML (since this is NOT created by @KafkaListener factory)
+  private final int concurrency;
+  private final AckMode ackMode;
+  private final long pollTimeoutMs;
+  private final boolean missingTopicsFatal;
+
   private volatile ConcurrentMessageListenerContainer<String, String> container;
   private volatile String currentTopic;
 
   public DynamicKafkaConsumer(
       ConsumerFactory<String, String> consumerFactory,
       @Qualifier("kafkaTransformer") Transformer transformer,
-      SinkRouter sinks
+      SinkRouter sinks,
+
+      @Value("${spring.kafka.listener.concurrency:1}") int concurrency,
+      @Value("${spring.kafka.listener.ack-mode:BATCH}") String ackMode,
+      @Value("${app.kafka.dynamic.poll-timeout-ms:3000}") long pollTimeoutMs,
+      @Value("${app.kafka.dynamic.missing-topics-fatal:true}") boolean missingTopicsFatal
   ) {
     this.consumerFactory = consumerFactory;
     this.transformer = transformer;
     this.sinks = sinks;
+
+    this.concurrency = Math.max(1, concurrency);
+    this.ackMode = parseAckMode(ackMode);
+    this.pollTimeoutMs = pollTimeoutMs;
+    this.missingTopicsFatal = missingTopicsFatal;
   }
 
   /** Start consuming from the given topic (switches topic if already running). */
@@ -54,18 +72,20 @@ public class DynamicKafkaConsumer {
     // If running on different topic, stop and recreate
     stop();
 
-    log.info("DynamicKafkaConsumer starting on topic={}", topic);
+    log.info("DynamicKafkaConsumer starting on topic={}, concurrency={}, ackMode={}, pollTimeoutMs={}, missingTopicsFatal={}",
+        topic, concurrency, ackMode, pollTimeoutMs, missingTopicsFatal);
 
     ContainerProperties props = new ContainerProperties(topic);
-    props.setAckMode(AckMode.BATCH);          // matches your yaml intent
-    props.setPollTimeout(3000);
+    props.setAckMode(ackMode);
+    props.setPollTimeout(pollTimeoutMs);
+    props.setMissingTopicsFatal(missingTopicsFatal);
 
     props.setMessageListener((MessageListener<String, String>) this::handleRecord);
 
     ConcurrentMessageListenerContainer<String, String> c =
         new ConcurrentMessageListenerContainer<>(consumerFactory, props);
 
-    // optional: name it for logs/metrics
+    c.setConcurrency(concurrency);
     c.setBeanName("dynamic-kafka-consumer");
 
     this.container = c;
@@ -93,6 +113,7 @@ public class DynamicKafkaConsumer {
   public void pause() {
     var c = container;
     if (c != null && c.isRunning()) {
+      // note: pause/resume affects delivery; polling may still occur internally
       log.info("DynamicKafkaConsumer pausing (topic={})", currentTopic);
       c.pause();
     }
@@ -125,7 +146,7 @@ public class DynamicKafkaConsumer {
     headers.put("kafka-partition", String.valueOf(record.partition()));
     headers.put("kafka-offset", String.valueOf(record.offset()));
     if (record.key() != null) {
-        headers.put("kafka-key", record.key());
+      headers.put("kafka-key", record.key());
     }
 
     try {
@@ -135,7 +156,7 @@ public class DynamicKafkaConsumer {
       log.error("DynamicKafkaConsumer: failed to transform/send record (topic={}, offset={})",
           record.topic(), record.offset(), e);
 
-      // send raw to DLT + error message to error sink (best-effort)
+      // best-effort DLT + error
       try {
         sinks.sendDlt(record.key(), record.value(), headers);
       } catch (Exception ex) {
@@ -146,6 +167,15 @@ public class DynamicKafkaConsumer {
       } catch (Exception ex) {
         log.warn("DynamicKafkaConsumer: failed to send to error sink", ex);
       }
+    }
+  }
+
+  private static AckMode parseAckMode(String s) {
+    if (s == null || s.isBlank()) return AckMode.BATCH;
+    try {
+      return AckMode.valueOf(s.trim().toUpperCase());
+    } catch (Exception ignored) {
+      return AckMode.BATCH;
     }
   }
 }

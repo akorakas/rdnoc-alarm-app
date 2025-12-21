@@ -1,3 +1,4 @@
+// src/main/java/com/example/kafka/nsp/NspSubscriptionManager.java
 package com.example.kafka.nsp;
 
 import java.util.Optional;
@@ -6,8 +7,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.DescribeTopicsResult;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.stereotype.Component;
 
 import com.example.kafka.kafka.DynamicKafkaConsumer;
@@ -21,7 +22,10 @@ public class NspSubscriptionManager {
 
   private final NspClient nspClient;
   private final SubscriptionStateStore stateStore;
-  private final KafkaAdmin kafkaAdmin;
+
+  /** ✅ Injected INPUT AdminClient (built from spring.kafka.consumer.*). Do NOT close per call. */
+  private final AdminClient inputAdmin;
+
   private final DynamicKafkaConsumer consumer;
   private final SyncCoordinator sync;
 
@@ -33,7 +37,7 @@ public class NspSubscriptionManager {
   public NspSubscriptionManager(
       NspClient nspClient,
       SubscriptionStateStore stateStore,
-      KafkaAdmin kafkaAdmin,
+      @Qualifier("inputAdminClient") AdminClient inputAdmin,
       DynamicKafkaConsumer consumer,
       SyncCoordinator sync,
       @Value("${app.nsp.subscription.topic-wait-timeout-ms:180000}") long topicWaitTimeoutMs,
@@ -41,29 +45,24 @@ public class NspSubscriptionManager {
   ) {
     this.nspClient = nspClient;
     this.stateStore = stateStore;
-    this.kafkaAdmin = kafkaAdmin;
+    this.inputAdmin = inputAdmin;
     this.consumer = consumer;
     this.sync = sync;
     this.topicWaitTimeoutMs = topicWaitTimeoutMs;
     this.topicWaitSleepMs = topicWaitSleepMs;
   }
 
-  // Create subscription only on startup OR topic missing OR renew failed (recreate)
   public void startFlow(String reason) throws Exception {
     withLock("startFlow", () -> {
       NspSubscriptionState state = ensureSubscription();
       waitTopicExists(state.topicId());
 
-      // sync first, then start consumer
       syncWithConsumerPaused(reason);
-
-      // start consumer on latest topic
       startConsumerOn(state.topicId());
       return null;
     });
   }
 
-  // Periodic sync pauses consumer and resumes after
   public void runPeriodicSync(String reason) {
     try {
       withLock("periodicSync", () -> {
@@ -75,7 +74,6 @@ public class NspSubscriptionManager {
     }
   }
 
-  // Renew periodically; if renew fails -> recreate subscription (topic changes)
   public void renewOrRecreate() {
     try {
       withLock("renew", () -> {
@@ -88,14 +86,12 @@ public class NspSubscriptionManager {
 
         NspSubscriptionState state = stateOpt.get();
 
-        // If topic missing while consumer runs -> recreate
         if (!topicExists(state.topicId())) {
           log.warn("Topic missing: {} -> recreate subscription", state.topicId());
           recreate("topic-missing");
           return null;
         }
 
-        // Renew
         nspClient.renewSubscription(state.subscriptionId());
         log.info("Renewed subscription {}", state.subscriptionId());
         return null;
@@ -130,18 +126,13 @@ public class NspSubscriptionManager {
   private void recreate(String reason) throws Exception {
     log.warn("Recreating subscription. reason={}", reason);
 
-    // stop consumer before changing topic
     consumer.stop();
-
     stateStore.clear();
 
     var state = ensureSubscription();
     waitTopicExists(state.topicId());
 
-    // run sync so you don’t miss events during topic switch
     syncWithConsumerPaused("recreate-" + reason);
-
-    // restart consumer on NEW topic
     startConsumerOn(state.topicId());
   }
 
@@ -187,8 +178,8 @@ public class NspSubscriptionManager {
   }
 
   private boolean topicExists(String topic) {
-    try (AdminClient admin = AdminClient.create(kafkaAdmin.getConfigurationProperties())) {
-      DescribeTopicsResult res = admin.describeTopics(java.util.List.of(topic));
+    try {
+      DescribeTopicsResult res = inputAdmin.describeTopics(java.util.List.of(topic));
       res.allTopicNames().get(5, TimeUnit.SECONDS);
       return true;
     } catch (Exception e) {

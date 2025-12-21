@@ -60,6 +60,7 @@ app:
 
   nsp:
     subscription:
+      renew-initial-delay-ms: 60000
       create-on-startup: true
       state-file: /app/state/nsp-subscription-state.json
 
