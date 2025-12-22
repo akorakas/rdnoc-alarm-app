@@ -92,6 +92,14 @@ app:
         property-filter: "affectedObjectType NOT LIKE 'NmsSystem'"
 
 spring:
+  jackson:
+    deserialization:
+      # IMPORTANT for UnifiedEvent.timestamp (Instant) when input is millis (13 digits)
+      read-date-timestamps-as-nanoseconds: false
+
+      # Avoid failures when NokiaAtnoiAlarm / SystemSpecificEvent sees extra fields
+      fail-on-unknown-properties: false
+
   kafka:
     consumer:
       bootstrap-servers: 172.17.52.133:9192
@@ -110,6 +118,9 @@ spring:
         "[fetch.min.bytes]": 1048576
         "[fetch.max.wait.ms]": 50
         "[partition.assignment.strategy]": org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+
+        # Optional (recommended): don’t auto-create topics by accident
+        "[allow.auto.create.topics]": false
 
         "[security.protocol]": SSL
         "[ssl.truststore.location]": "/app/certs/lab/nsp.truststore"
@@ -147,37 +158,43 @@ spring:
       auto-startup: false
       missing-topics-fatal: true
 
-    admin:
-      fail-fast: true
-      bootstrap-servers: 172.17.52.133:9192
-      properties:
-        "[security.protocol]": SSL
-        "[ssl.truststore.location]": "/app/certs/lab/nsp.truststore"
-        "[ssl.truststore.password]": "NokiaNsp1!trust"
-        "[ssl.truststore.type]": JKS
-        "[request.timeout.ms]": 10000
-        "[default.api.timeout.ms]": 10000
-
 transform:
   placeholder: "{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}"
   validate-on-start: true
   validate-template-on-start: true
 
+  # ───────────────────────────── Subscription flow (KAFKA) ────────────────────
   kafka:
     pipeline:
-      # ✅ Make alarm-change OPTIONAL because the topic can contain other message types too
+      # 0) Get the notification object from the wrapper
       - type: extract
+        failOnMissing: true
+        failOnBadJson: true
+        mappings:
+          notification: "/payload/data/ietf-restconf:notification"
+
+      # 1) From the notification, pick alarm-change or alarm-delete
+      - type: extract
+        fromVar: notification
         failOnMissing: false
         failOnBadJson: true
         mappings:
-          sourceEvent: "/"
-          alarmNode: "data.ietf-restconf:notification.nsp-fault:alarm-change"
-          alarmDeleteNode: "data.ietf-restconf:notification.nsp-fault:alarm-delete"
+          eventTime: "/eventTime"
+          alarmChange: "/nsp-fault:alarm-change"
+          alarmDelete: "/nsp-fault:alarm-delete"
 
-      # ✅ Do not hard-fail if alarmNode is missing (non alarm-change messages)
+      # 2) Choose which alarm node we will process; also set sourceEvent to that node
+      - type: update
+        compute:
+          - set: alarmNode
+            expr: "alarmChange != null ? alarmChange : alarmDelete"
+          - set: sourceEvent
+            expr: "alarmNode"
+
+      # 3) Extract fields from alarmNode (works for alarm-change and alarm-delete)
       - type: extract
         fromVar: alarmNode
-        failOnMissing: false
+        failOnMissing: true
         failOnBadJson: true
         mappings:
           emsDomain: "/sourceType"
@@ -188,50 +205,49 @@ transform:
           serialNo: "/objectId"
           probableCause: "/probableCause"
           alarmType: "/alarmType"
-          impact: "/impact"
           objectFullName: "/objectFullName"
 
-      # ✅ Optional fields (includes serviceAffecting now)
-      - type: extract
-        fromVar: alarmNode
-        failOnMissing: false
-        failOnBadJson: true
-        mappings:
-          timestampNew: "lastTimeDetected.new-value"
-          timestampRaw: "/lastTimeDetected"
-          severityNew: "severity.new-value"
-          severityRaw: "/severity"
-          serviceAffecting: "/serviceAffecting"
-
+      # 4) Optional fields (NEVER fail startup/processing)
       - type: extract
         fromVar: alarmNode
         failOnMissing: false
         failOnBadJson: false
         mappings:
+          severityNew: "severity.new-value"
+          severityRaw: "/severity"
+          timestampNew: "lastTimeDetected.new-value"
+          impact: "/impact"
+          serviceAffecting: "/serviceAffecting"
           fdn: "/fdn"
           objectId: "/objectId"
 
+      # 5) Compute normalized / safe fields (prevents invalid JSON)
       - type: update
         compute:
           - set: severity
             expr: "UPPER(COALESCE(severityNew, severityRaw))"
-
-          # ✅ include alarmDeleteNode as a CLEAR trigger
-          - set: type
-            expr: "severity == 'CLEARED' ? 'CLEAR' : ((alarmDeleteNode != null) ? 'CLEAR' : (fdn != null ? 'FAULT_SYNC' : (objectId != null ? 'FAULT' : 'UNKNOWN')))"
-
           - set: timestamp
-            expr: "timestampNew != null ? timestampNew : timestampRaw"
-
-          - set: emsDomainNormalized
-            expr: "emsDomain == 'IP' ? 'IP' : (emsDomain == 'TRANSPORT' ? 'TRANSPORT' : 'UNKNOWN')"
-
-          - set: alarmIdentifier
-            expr: "objectFullName"
-
-          # ✅ default serviceAffecting when missing
+            expr: "timestampNew != null ? timestampNew : null"
+          - set: impactSafe
+            expr: "impact != null ? impact : 0"
           - set: serviceAffectingSafe
-            expr: "serviceAffecting == true ? 'true' : 'false'"
+            expr: "serviceAffecting == null ? 'null' : (serviceAffecting == true ? 'true' : 'false')"
+          - set: type
+            expr: "alarmDelete != null ? 'CLEAR' : 'FAULT'"
+          - set: alarmIdentifier
+            expr: "objectFullName != null ? objectFullName : faultId"
+          - set: timestampSec
+            expr: "timestamp != null ? (timestamp / 1000) : null"
+          # subnetworkName = first part until underscore (e.g. ANLAB-01)
+          - set: subnetworkName
+            expr: "neName != null && INDEX_OF(neName, '_') > 0 ? SUBSTRING(neName, 0, INDEX_OF(neName, '_')) : neName"
+      
+          # affectedLocationName = part after last '_' and before '-' (e.g. 9536 from ..._9536-763)
+          - set: affectedLocationName
+            expr: |
+              neName != null && LAST_INDEX_OF(neName, '_') >= 0 && LAST_INDEX_OF(neName, '-') > LAST_INDEX_OF(neName, '_')
+                ? SUBSTRING(neName, LAST_INDEX_OF(neName, '_') + 1, LAST_INDEX_OF(neName, '-'))
+                : null
 
       - type: template
         target: "$"
@@ -246,7 +262,7 @@ transform:
             "neEquipment": "${neId} | ${affectedObjectName}",
             "type": "${type}",
             "severity": "${severity}",
-            "timestamp": ${timestamp},
+            "timestamp": ${timestampSec},
             "sourceEvent": ${sourceEvent},
             "metadata": {
               "neId": "${neId}",
@@ -255,14 +271,22 @@ transform:
               "emsDomainRaw": "${emsDomain}",
               "probableCause": "${probableCause}",
               "alarmType": "${alarmType}",
-              "impact": ${impact},
+              "impact": ${impactSafe},
               "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
-            "enrichedData": null,
-            "alarmIdentifier": "${objectFullName}"
+            "enrichedData": {
+              "affectedLocation": {
+                "name": "${affectedLocationName}"
+              },
+              "transport": {
+                "subnetworkName": "${subnetworkName}"
+              }
+            },
+            "alarmIdentifier": "${alarmIdentifier}"
           }
 
+  # ───────────────────────────── Sync flow (REST) ─────────────────────────────
   rest:
     pipeline:
       - type: extract
@@ -303,9 +327,21 @@ transform:
           - set: impactSafe
             expr: "impact != null ? impact : 0"
           - set: serviceAffectingSafe
-            expr: "serviceAffecting == true ? 'true' : 'false'"
+            expr: "serviceAffecting == null ? 'null' : (serviceAffecting == true ? 'true' : 'false')"
           - set: alarmIdentifier
             expr: "objectFullName != null ? objectFullName : faultId"
+          - set: timestampSec
+            expr: "timestamp != null ? (timestamp / 1000) : null"
+          # subnetworkName = first part until underscore (e.g. ANLAB-01)
+          - set: subnetworkName
+            expr: "neName != null && INDEX_OF(neName, '_') > 0 ? SUBSTRING(neName, 0, INDEX_OF(neName, '_')) : neName"
+      
+          # affectedLocationName = part after last '_' and before '-' (e.g. 9536 from ..._9536-763)
+          - set: affectedLocationName
+            expr: |
+              neName != null && LAST_INDEX_OF(neName, '_') >= 0 && LAST_INDEX_OF(neName, '-') > LAST_INDEX_OF(neName, '_')
+                ? SUBSTRING(neName, LAST_INDEX_OF(neName, '_') + 1, LAST_INDEX_OF(neName, '-'))
+                : null
 
       - type: template
         target: "$"
@@ -320,7 +356,7 @@ transform:
             "neEquipment": "${neId} | ${affectedObjectName}",
             "type": "${type}",
             "severity": "${severity}",
-            "timestamp": ${timestamp},
+            "timestamp": ${timestampSec},
             "sourceEvent": ${sourceEvent},
             "metadata": {
               "neId": "${neId}",
@@ -333,7 +369,14 @@ transform:
               "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
-            "enrichedData": null,
+            "enrichedData": {
+              "affectedLocation": {
+                "name": "${affectedLocationName}"
+              },
+              "transport": {
+                "subnetworkName": "${subnetworkName}"
+              }
+            },
             "alarmIdentifier": "${alarmIdentifier}"
           }
 

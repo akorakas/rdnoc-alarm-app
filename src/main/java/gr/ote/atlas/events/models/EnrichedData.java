@@ -8,6 +8,7 @@ import java.util.List;
 @Getter @Setter
 public class EnrichedData {
     private AffectedLocation affectedLocation;
+    private TransportEnrichment transport;
     private String affectedSite;
     private String affectedController;
     private String affectedCell;
