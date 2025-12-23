@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+import com.example.kafka.atlas.UnifiedEventMapper;
 import com.example.kafka.service.config.TransformProperties;
 import com.example.kafka.service.errors.BadInputException;
 import com.example.kafka.service.errors.TransformFailureException;
@@ -22,6 +23,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public class Transformer {
 
   private static final ObjectMapper M = new ObjectMapper();
+  private static final UnifiedEventMapper unifiedEventMapper = new UnifiedEventMapper();
+
   private final List<TransformStep> steps;
 
   public Transformer(String placeholder, List<TransformProperties.Step> pipeline) {
@@ -84,7 +87,7 @@ public class Transformer {
         case "flatten"  -> out.add(new FlattenStep(s.getRoots(), s.getIncludeTop(), s.getTarget()));
         case "hash"     -> out.add(new HashStep(s.getAlgorithm(), s.getFields(), s.getTarget()));
         case "neNameEnrich" -> out.add(new NeNameEnrichmentStep());
-        case "unifiedEvent" -> out.add(new UnifiedEventStep());
+        case "unifiedEvent" -> out.add(new UnifiedEventStep(unifiedEventMapper, M));
         case "template" -> out.add(new TemplateStep(s.getTemplate(), s.getTarget()));
         default -> throw new IllegalArgumentException("Unknown step type: " + s.getType());
       }

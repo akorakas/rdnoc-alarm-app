@@ -16,36 +16,56 @@ import gr.ote.atlas.events.models.UnifiedEvent;
 public class UnifiedEventMapper {
 
   public UnifiedEvent fromContext(TransformContext ctx) {
-    // Expect these vars to exist from your previous extract/update steps:
-    // - eventTime (String) or timestamp (long)
-    // - sourceEvent (JsonNode)  <-- you set this in update step
-    // - metadata / enrichedData if you build them earlier (optional)
 
-    JsonNode sourceEventNode = ctx.get("sourceEvent");   // should be JsonNode
-    String eventTime = ctx.get("eventTime");             // e.g. "2025-12-23T11:52:16Z"
+    // UnifiedEventStep guarantees this is JsonNode now
+    JsonNode sourceEventNode = ctx.get("sourceEvent");
+
+    // From YAML (may be null depending on flow)
+    String eventTime = ctx.get("eventTime");      // subscription only (ISO-8601)
+    Object tsObj     = ctx.get("timestamp");      // both flows (ms), but could be Long or String
+    Long tsMs        = toLong(tsObj);
+
+    String typeStr   = ctx.get("type");           // you compute this in YAML
+    String sevStr    = ctx.get("severity");       // you compute/normalize this in YAML
+
+    String emsDomainRaw = ctx.get("emsDomain");   // extracted from YAML
+    String neId = ctx.get("neId");
+    String neName = ctx.get("neName");
+    String affectedObjectName = ctx.get("affectedObjectName");
+    String faultId = ctx.get("faultId");
+    String serialNo = ctx.get("serialNo");
+    String alarmIdentifier = ctx.get("alarmIdentifier");
+    String objectFullName = ctx.get("objectFullName");
 
     UnifiedEvent ue = new UnifiedEvent();
 
     ue.setSourceEms(EMSId.NSP_ATNOI);
     ue.setEmsVendorID(EMSVendorID.NSP);
 
-    // emsDomain: in your input sourceType="mdm" but your EMSDomain enum is FAN/RAN/TRANSPORT/IP/UNKNOWN
-    // so map it:
-    ue.setEmsDomain(mapDomain(getText(sourceEventNode, "sourceType")));
+    // Prefer ctx.emsDomain; fallback to sourceEvent.sourceType
+    ue.setEmsDomain(mapDomain(firstNonBlank(emsDomainRaw, getText(sourceEventNode, "sourceType"))));
 
-    ue.setType(EventType.FAULT); // or map from alarm-change/alarm-delete/create later
-    ue.setSeverity(mapSeverity(getText(sourceEventNode, "severity")));
+    // Type from ctx.type (CLEAR/CHANGE/FAULT/FAULT_SYNC/UNKNOWN)
+    ue.setType(mapEventType(typeStr));
 
-    ue.setTimestamp(parseEventTime(eventTime));
+    // Severity from ctx.severity; fallback to sourceEvent.severity
+    ue.setSeverity(mapSeverity(firstNonBlank(sevStr, getText(sourceEventNode, "severity"))));
 
-    // Fill fields from source event
-    ue.setSerialNo(getText(sourceEventNode, "objectId"));
-    ue.setFaultId(getText(sourceEventNode, "alarmName"));
-    ue.setNeName(getText(sourceEventNode, "neName"));
-    ue.setNeEquipment(getText(sourceEventNode, "neId") + " | " + getText(sourceEventNode, "neName"));
-    ue.setAlarmIdentifier(getText(sourceEventNode, "objectFullName"));
+    // Timestamp: prefer eventTime ISO, else timestamp ms, else now
+    ue.setTimestamp(parseEventTime(eventTime, tsMs));
 
-    // Build NokiaAtnoiAlarm object as sourceEvent
+    // Core fields: prefer ctx vars (you already extracted them)
+    ue.setSerialNo(firstNonBlank(serialNo, getText(sourceEventNode, "objectId")));
+    ue.setFaultId(firstNonBlank(faultId, getText(sourceEventNode, "alarmName")));
+    ue.setNeName(firstNonBlank(neName, getText(sourceEventNode, "neName")));
+
+    // Keep same style you used in template: neId | affectedObjectName
+    String neEquip = (neId != null ? neId : "") + " | " + (affectedObjectName != null ? affectedObjectName : "");
+    ue.setNeEquipment(neEquip);
+
+    ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId));
+
+    // Build NokiaAtnoiAlarm as sourceEvent (from JsonNode)
     NokiaAtnoiAlarm n = new NokiaAtnoiAlarm();
     n.setOriginalSeverity(getText(sourceEventNode, "originalSeverity"));
     n.setNeId(getText(sourceEventNode, "neId"));
@@ -66,11 +86,54 @@ public class UnifiedEventMapper {
 
     ue.setSourceEvent(n);
 
-    // metadata/enrichedData: if you already computed these earlier, set them here too.
-    // ue.setMetadata(ctx.get("metadata"));
-    // ue.setEnrichedData(ctx.get("enrichedData"));
-
     return ue;
+  }
+
+  // ---------------- helpers ----------------
+
+  private static Instant parseEventTime(String eventTime, Long tsMs) {
+    if (eventTime != null && !eventTime.isBlank()) {
+      try {
+        return Instant.parse(eventTime);
+      } catch (Exception ignore) {
+        // fall through to tsMs/now
+      }
+    }
+    if (tsMs != null && tsMs > 0) {
+      return Instant.ofEpochMilli(tsMs);
+    }
+    return Instant.now();
+  }
+
+  private static EventType mapEventType(String type) {
+    if (type == null) return EventType.FAULT;
+
+    // If your enum includes CLEAR/CHANGE/FAULT/SYNC_* you can also do valueOf safely with try/catch
+    return switch (type.toUpperCase()) {
+      case "CLEAR" -> EventType.CLEAR;
+      case "CHANGE" -> EventType.CHANGE;
+      case "FAULT", "FAULT_SYNC" -> EventType.FAULT;
+      default -> EventType.FAULT;
+    };
+  }
+
+  private static String firstNonBlank(String... vals) {
+    if (vals == null) return null;
+    for (String v : vals) {
+      if (v != null && !v.isBlank()) return v;
+    }
+    return null;
+  }
+
+  private static Long toLong(Object v) {
+    if (v == null) return null;
+    if (v instanceof Long l) return l;
+    if (v instanceof Integer i) return i.longValue();
+    if (v instanceof Number n) return n.longValue();
+    if (v instanceof String s) {
+      try { return Long.parseLong(s.trim()); } catch (Exception ignore) {}
+    }
+    return null;
   }
 
   private static String getText(JsonNode n, String field) {
@@ -83,11 +146,6 @@ public class UnifiedEventMapper {
     if (n == null) return null;
     JsonNode v = n.get(field);
     return (v == null || v.isNull()) ? null : v.asLong();
-  }
-
-  private static Instant parseEventTime(String eventTime) {
-    if (eventTime == null || eventTime.isBlank()) return Instant.now();
-    return Instant.parse(eventTime); // expects ISO-8601 like 2025-12-23T11:52:16Z
   }
 
   private static Severity mapSeverity(String sev) {
@@ -105,9 +163,8 @@ public class UnifiedEventMapper {
 
   private static EMSDomain mapDomain(String sourceType) {
     if (sourceType == null) return EMSDomain.UNKNOWN;
-    // you can refine this mapping later
     return switch (sourceType.toLowerCase()) {
-      case "mdm" -> EMSDomain.IP;      // your example "mdm" looks IP-ish in your enums
+      case "mdm" -> EMSDomain.IP;
       default -> EMSDomain.UNKNOWN;
     };
   }
