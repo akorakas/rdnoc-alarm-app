@@ -22,7 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class Transformer {
 
-  private static final ObjectMapper M = new ObjectMapper();
+  private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
   private static final UnifiedEventMapper unifiedEventMapper = new UnifiedEventMapper();
 
   private final List<TransformStep> steps;

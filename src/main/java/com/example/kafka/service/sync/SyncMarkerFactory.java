@@ -20,7 +20,7 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class SyncMarkerFactory {
 
-  private final ObjectMapper om; // <-- inject Spring's mapper
+  private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
 
   public String buildSyncStart() { return build(EventType.SYNC_START); }
   public String buildSyncEnd()   { return build(EventType.SYNC_END); }
@@ -63,7 +63,7 @@ public class SyncMarkerFactory {
           "markerType", type.name()
       ));
 
-      return om.writeValueAsString(u);
+      return M.writeValueAsString(u);
 
     } catch (Exception e) {
       throw new RuntimeException("Failed to build sync marker " + type, e);

@@ -30,6 +30,11 @@
       <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
 
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
     <!-- Prometheus and Actuator; -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
