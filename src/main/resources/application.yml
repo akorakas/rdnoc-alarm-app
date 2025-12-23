@@ -197,16 +197,24 @@ transform:
       - type: update
         compute:
           - set: alarmNode
-            expr: "alarmChange != null ? alarmChange : (alarmCreate != null ? alarmCreate : alarmDelete)"
+            expr: "alarmChange != null ? alarmChange : alarmCreate"
           - set: sourceEvent
-            expr: "alarmNode"
+            expr: "alarmNode != null ? alarmNode : alarmDelete"
           - set: alarmEventKind
             expr: "alarmDelete != null ? 'DELETE' : (alarmCreate != null ? 'CREATE' : (alarmChange != null ? 'CHANGE' : 'UNKNOWN'))"
+
+      # 2b) Extract delete objectId if alarm-delete
+      - type: extract
+        fromVar: alarmDelete
+        failOnMissing: false
+        failOnBadJson: false
+        mappings:
+          deleteObjectId: "/objectId"
 
       # 3) Extract fields from alarmNode (common)
       - type: extract
         fromVar: alarmNode
-        failOnMissing: true
+        failOnMissing: false
         failOnBadJson: true
         mappings:
           emsDomain: "/sourceType"
@@ -250,7 +258,11 @@ transform:
           - set: type
             expr: "alarmEventKind == 'DELETE' ? 'CLEAR' : (alarmEventKind == 'CHANGE' ? 'CHANGE' : (alarmEventKind == 'CREATE' ? 'FAULT' : 'UNKNOWN'))"
           - set: alarmIdentifier
-            expr: "objectFullName != null ? objectFullName : faultId"
+            expr: "objectFullName != null ? objectFullName : (faultId != null ? faultId : deleteObjectId)"
+          - set: faultId
+            expr: "faultId != null ? faultId : deleteObjectId"
+          - set: emsDomain
+            expr: "emsDomain != null ? emsDomain : 'UNKNOWN'"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
 

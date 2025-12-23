@@ -1,6 +1,7 @@
 package com.example.kafka.atlas;
 
 import java.time.Instant;
+import java.util.Map;
 
 import com.example.kafka.service.pipeline.TransformContext;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -11,6 +12,7 @@ import gr.ote.atlas.events.enums.EMSId;
 import gr.ote.atlas.events.enums.EMSVendorID;
 import gr.ote.atlas.events.enums.EventType;
 import gr.ote.atlas.events.enums.Severity;
+import gr.ote.atlas.events.models.EnrichedData;
 import gr.ote.atlas.events.models.UnifiedEvent;
 
 public class UnifiedEventMapper {
@@ -28,7 +30,7 @@ public class UnifiedEventMapper {
     String typeStr   = ctx.get("type");           // you compute this in YAML
     String sevStr    = ctx.get("severity");       // you compute/normalize this in YAML
 
-    String emsDomainRaw = ctx.get("emsDomain");   // extracted from YAML
+    String emsDomainRaw = ctx.get("emsDomain");   // extracted from YAML (may be null for DELETE)
     String neId = ctx.get("neId");
     String neName = ctx.get("neName");
     String affectedObjectName = ctx.get("affectedObjectName");
@@ -54,16 +56,17 @@ public class UnifiedEventMapper {
     // Timestamp: prefer eventTime ISO, else timestamp ms, else now
     ue.setTimestamp(parseEventTime(eventTime, tsMs));
 
-    // Core fields: prefer ctx vars (you already extracted them)
+    // Core fields: prefer ctx vars (you already extracted them / computed them)
     ue.setSerialNo(firstNonBlank(serialNo, getText(sourceEventNode, "objectId")));
     ue.setFaultId(firstNonBlank(faultId, getText(sourceEventNode, "alarmName")));
     ue.setNeName(firstNonBlank(neName, getText(sourceEventNode, "neName")));
 
-    // Keep same style you used in template: neId | affectedObjectName
-    String neEquip = (neId != null ? neId : "") + " | " + (affectedObjectName != null ? affectedObjectName : "");
+    // Keep same style you used: neId | affectedObjectName
+    String neEquip =
+        (neId != null ? neId : "") + " | " + (affectedObjectName != null ? affectedObjectName : "");
     ue.setNeEquipment(neEquip);
 
-    ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId));
+    ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId, serialNo));
 
     // Build NokiaAtnoiAlarm as sourceEvent (from JsonNode)
     NokiaAtnoiAlarm n = new NokiaAtnoiAlarm();
@@ -84,7 +87,28 @@ public class UnifiedEventMapper {
     n.setAdditionalText(getText(sourceEventNode, "additionalText"));
     n.setSourceSystem(getText(sourceEventNode, "sourceSystem"));
 
+    // ✅ recommended fallbacks for DELETE (where sourceEventNode may contain only objectId)
+    if (n.getObjectId() == null) n.setObjectId(serialNo);
+    if (n.getObjectFullName() == null) n.setObjectFullName(objectFullName);
+    if (n.getAlarmName() == null) n.setAlarmName(faultId);
+    if (n.getNeId() == null) n.setNeId(neId);
+    if (n.getNeName() == null) n.setNeName(neName);
+
     ue.setSourceEvent(n);
+
+    // ✅ Attach typed enrichment produced by NeNameEnrichmentStep (ctx key: enrichedData)
+    Object edObj = ctx.get("enrichedData");
+    if (edObj instanceof EnrichedData ed) {
+      ue.setEnrichedData(ed);
+    }
+
+    // ✅ Optional metadata
+    Object mdObj = ctx.get("metadata");
+    if (mdObj instanceof Map<?, ?> m) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> md = (Map<String, Object>) m;
+      ue.setMetadata(md);
+    }
 
     return ue;
   }
@@ -108,11 +132,13 @@ public class UnifiedEventMapper {
   private static EventType mapEventType(String type) {
     if (type == null) return EventType.FAULT;
 
-    // If your enum includes CLEAR/CHANGE/FAULT/SYNC_* you can also do valueOf safely with try/catch
     return switch (type.toUpperCase()) {
       case "CLEAR" -> EventType.CLEAR;
       case "CHANGE" -> EventType.CHANGE;
       case "FAULT", "FAULT_SYNC" -> EventType.FAULT;
+      // if you ever pass SYNC_* through the pipeline, handle them too:
+      case "SYNC_START" -> EventType.SYNC_START;
+      case "SYNC_END" -> EventType.SYNC_END;
       default -> EventType.FAULT;
     };
   }
