@@ -12,6 +12,7 @@ import com.example.kafka.service.pipeline.TransformStep;
 import com.example.kafka.service.pipeline.steps.ExtractStep;
 import com.example.kafka.service.pipeline.steps.FlattenStep;
 import com.example.kafka.service.pipeline.steps.HashStep;
+import com.example.kafka.service.pipeline.steps.NeNameEnrichmentStep;
 import com.example.kafka.service.pipeline.steps.RegexExtractStep;
 import com.example.kafka.service.pipeline.steps.TemplateStep;
 import com.example.kafka.service.pipeline.steps.UpdateStep;
@@ -81,6 +82,7 @@ public class Transformer {
         }
         case "flatten"  -> out.add(new FlattenStep(s.getRoots(), s.getIncludeTop(), s.getTarget()));
         case "hash"     -> out.add(new HashStep(s.getAlgorithm(), s.getFields(), s.getTarget()));
+        case "neNameEnrich" -> out.add(new NeNameEnrichmentStep());
         case "template" -> out.add(new TemplateStep(s.getTemplate(), s.getTarget()));
         default -> throw new IllegalArgumentException("Unknown step type: " + s.getType());
       }

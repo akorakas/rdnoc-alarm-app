@@ -238,16 +238,8 @@ transform:
             expr: "objectFullName != null ? objectFullName : faultId"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
-          # subnetworkName = first part until underscore (e.g. ANLAB-01)
-          - set: subnetworkName
-            expr: "neName != null && INDEX_OF(neName, '_') > 0 ? SUBSTRING(neName, 0, INDEX_OF(neName, '_')) : neName"
-      
-          # affectedLocationName = part after last '_' and before '-' (e.g. 9536 from ..._9536-763)
-          - set: affectedLocationName
-            expr: |
-              neName != null && LAST_INDEX_OF(neName, '_') >= 0 && LAST_INDEX_OF(neName, '-') > LAST_INDEX_OF(neName, '_')
-                ? SUBSTRING(neName, LAST_INDEX_OF(neName, '_') + 1, LAST_INDEX_OF(neName, '-'))
-                : null
+
+      - type: neNameEnrich
 
       - type: template
         target: "$"
@@ -275,14 +267,7 @@ transform:
               "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
-            "enrichedData": {
-              "affectedLocation": {
-                "name": "${affectedLocationName}"
-              },
-              "transport": {
-                "subnetworkName": "${subnetworkName}"
-              }
-            },
+            "enrichedData": {enrichedDataJson},
             "alarmIdentifier": "${alarmIdentifier}"
           }
 
@@ -332,16 +317,8 @@ transform:
             expr: "objectFullName != null ? objectFullName : faultId"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
-          # subnetworkName = first part until underscore (e.g. ANLAB-01)
-          - set: subnetworkName
-            expr: "neName != null && INDEX_OF(neName, '_') > 0 ? SUBSTRING(neName, 0, INDEX_OF(neName, '_')) : neName"
-      
-          # affectedLocationName = part after last '_' and before '-' (e.g. 9536 from ..._9536-763)
-          - set: affectedLocationName
-            expr: |
-              neName != null && LAST_INDEX_OF(neName, '_') >= 0 && LAST_INDEX_OF(neName, '-') > LAST_INDEX_OF(neName, '_')
-                ? SUBSTRING(neName, LAST_INDEX_OF(neName, '_') + 1, LAST_INDEX_OF(neName, '-'))
-                : null
+
+      - type: neNameEnrich
 
       - type: template
         target: "$"
@@ -369,14 +346,7 @@ transform:
               "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
-            "enrichedData": {
-              "affectedLocation": {
-                "name": "${affectedLocationName}"
-              },
-              "transport": {
-                "subnetworkName": "${subnetworkName}"
-              }
-            },
+            "enrichedData": {enrichedDataJson},
             "alarmIdentifier": "${alarmIdentifier}"
           }
 
