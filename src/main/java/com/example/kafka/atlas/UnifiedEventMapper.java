@@ -1,4 +1,4 @@
-package com.example.kafka.service.pipeline.steps;
+package com.example.kafka.atlas;
 
 import java.time.Instant;
 

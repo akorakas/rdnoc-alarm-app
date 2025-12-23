@@ -2,6 +2,7 @@ package com.example.kafka.service.config;
 
 import java.util.List;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -19,6 +20,7 @@ import com.example.kafka.service.pipeline.steps.TemplateStep;
  * the template step found in transform.rest.pipeline.
  */
 @Configuration
+@ConditionalOnProperty(name = "transform.templates.enabled", havingValue = "true", matchIfMissing = false)
 public class TemplateStepConfig {
 
   @Bean

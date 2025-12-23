@@ -5,12 +5,14 @@ import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import com.example.kafka.service.config.TransformProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Component
+@ConditionalOnProperty(name = "transform.templates.enabled", havingValue = "true", matchIfMissing = false)
 public class TemplateSyntaxStartupValidator implements ApplicationRunner {
 
   private static final ObjectMapper M = new ObjectMapper();

@@ -155,9 +155,11 @@ spring:
       missing-topics-fatal: true
 
 transform:
+  templates:
+    enabled: false
+
   placeholder: "{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}"
   validate-on-start: false
-  # template validation is no longer relevant if you removed TemplateStep usage
   validate-template-on-start: false
 
   # ───────────────────────────── Subscription flow (KAFKA) ────────────────────
@@ -266,6 +268,7 @@ transform:
         mappings:
           emsDomain: "/sourceType"
           faultId: "/alarmName"
+          eventTime: "/eventTime"
           timestamp: "/lastTimeDetected"
           neId: "/neId"
           affectedObjectName: "/affectedObjectName"

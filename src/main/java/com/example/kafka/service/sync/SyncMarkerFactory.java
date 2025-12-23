@@ -7,7 +7,7 @@ import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import gr.ote.atlas.events.emsspecificevents.SystemSpecificEvent;
+import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
 import gr.ote.atlas.events.enums.EMSDomain;
 import gr.ote.atlas.events.enums.EMSId;
 import gr.ote.atlas.events.enums.EMSVendorID;
@@ -20,45 +20,50 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class SyncMarkerFactory {
 
-  private final ObjectMapper mapper;
+  private final ObjectMapper om; // <-- inject Spring's mapper
 
-  public String buildSyncStart() {
-    return build(EventType.SYNC_START);
-  }
-
-  public String buildSyncEnd() {
-    return build(EventType.SYNC_END);
-  }
+  public String buildSyncStart() { return build(EventType.SYNC_START); }
+  public String buildSyncEnd()   { return build(EventType.SYNC_END); }
 
   private String build(EventType type) {
     try {
       UnifiedEvent u = new UnifiedEvent();
 
+      // Stable identity
       u.setSourceEms(EMSId.NSP_ATNOI);
       u.setEmsVendorID(EMSVendorID.NSP);
       u.setEmsDomain(EMSDomain.UNKNOWN);
 
-      u.setSerialNo("SYNC");
-      u.setFaultId(type.name());
-      u.setNeName("SYNC");
-      u.setNeEquipment("SYNC");
-
+      // Marker type + timestamp
       u.setType(type);
       u.setSeverity(Severity.UNKNOWN);
       u.setTimestamp(Instant.now());
 
-      // minimal system-specific event
-      SystemSpecificEvent src = new SystemSpecificEvent();
-      src.setEventType(type);
-      src.setObjectIdentifier("SYNC");
-      src.setMetadata(Map.of("marker", true));
-      u.setSourceEvent(src);
-
-      u.setMetadata(Map.of("source", "SYNC"));
-      u.setEnrichedData(null);
+      // Keep required strings non-null (safer for downstream)
+      u.setSerialNo("");
+      u.setFaultId("");
+      u.setNeName("");
+      u.setNeEquipment("");
       u.setAlarmIdentifier(type.name());
 
-      return mapper.writeValueAsString(u);
+      // Put an object as sourceEvent (so JSON has "sourceEvent": {...})
+      NokiaAtnoiAlarm se = new NokiaAtnoiAlarm();
+      se.setEventType(type);
+      se.setObjectIdentifier(type.name());
+      se.setAdditionalText("SYNC_MARKER");
+      se.setAlarmName(type.name());
+      se.setNeId("");
+      se.setNeName("");
+
+      u.setSourceEvent(se);
+
+      // Optional metadata (handy for filtering/debug)
+      u.setMetadata(Map.of(
+          "source", "SYNC",
+          "markerType", type.name()
+      ));
+
+      return om.writeValueAsString(u);
 
     } catch (Exception e) {
       throw new RuntimeException("Failed to build sync marker " + type, e);
