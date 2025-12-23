@@ -16,6 +16,8 @@ import com.example.kafka.service.pipeline.steps.NeNameEnrichmentStep;
 import com.example.kafka.service.pipeline.steps.RegexExtractStep;
 import com.example.kafka.service.pipeline.steps.TemplateStep;
 import com.example.kafka.service.pipeline.steps.UpdateStep;
+import com.example.kafka.service.pipeline.steps.UnifiedEventStep;
+import com.example.kafka.service.pipeline.steps.UnifiedEventMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class Transformer {
@@ -84,6 +86,7 @@ public class Transformer {
         case "hash"     -> out.add(new HashStep(s.getAlgorithm(), s.getFields(), s.getTarget()));
         case "neNameEnrich" -> out.add(new NeNameEnrichmentStep());
         case "template" -> out.add(new TemplateStep(s.getTemplate(), s.getTarget()));
+        case "unifiedEvent" -> out.add(new UnifiedEventStep(new UnifiedEventMapper(), M));
         default -> throw new IllegalArgumentException("Unknown step type: " + s.getType());
       }
     }

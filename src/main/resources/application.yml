@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# rdnoc-alarm-app :: application.yml
+# rdnoc-alarm-app :: application.yml  (UPDATED for UnifiedEvent step + alarmCreate)
 # ─────────────────────────────────────────────────────────────────────────────
 
 server:
@@ -46,6 +46,8 @@ app:
     subscription:
       renew-initial-delay-ms: 60000
       create-on-startup: true
+
+      # IMPORTANT: this file must be writable by uid=999 inside the container
       state-file: /app/state/nsp-subscription-state.json
 
       renew-enabled: true
@@ -94,10 +96,7 @@ app:
 spring:
   jackson:
     deserialization:
-      # IMPORTANT for UnifiedEvent.timestamp (Instant) when input is millis (13 digits)
       read-date-timestamps-as-nanoseconds: false
-
-      # Avoid failures when NokiaAtnoiAlarm / SystemSpecificEvent sees extra fields
       fail-on-unknown-properties: false
 
   kafka:
@@ -108,7 +107,6 @@ spring:
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-
       properties:
         "[client.id]": kafka-app-consumer
         "[max.poll.records]": 10000
@@ -118,8 +116,6 @@ spring:
         "[fetch.min.bytes]": 1048576
         "[fetch.max.wait.ms]": 50
         "[partition.assignment.strategy]": org.apache.kafka.clients.consumer.CooperativeStickyAssignor
-
-        # Optional (recommended): don’t auto-create topics by accident
         "[allow.auto.create.topics]": false
 
         "[security.protocol]": SSL
@@ -161,19 +157,28 @@ spring:
 transform:
   placeholder: "{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}"
   validate-on-start: true
-  validate-template-on-start: true
+  # template validation is no longer relevant if you removed TemplateStep usage
+  validate-template-on-start: false
 
   # ───────────────────────────── Subscription flow (KAFKA) ────────────────────
   kafka:
     pipeline:
       # 0) Get the notification object from the wrapper
       - type: extract
-        failOnMissing: true
+        failOnMissing: false
         failOnBadJson: true
         mappings:
           notification: "/payload/data/ietf-restconf:notification"
+          notificationDirect: "/ietf-restconf:notification"
+          rootDoc: "/"
 
-      # 1) From the notification, pick alarm-change or alarm-delete
+      # 0b) Choose notification from whichever exists
+      - type: update
+        compute:
+          - set: notification
+            expr: "notification != null ? notification : (notificationDirect != null ? notificationDirect : rootDoc)"
+
+      # 1) From the notification, pick alarm-change / alarm-delete / alarm-create
       - type: extract
         fromVar: notification
         failOnMissing: false
@@ -182,16 +187,19 @@ transform:
           eventTime: "/eventTime"
           alarmChange: "/nsp-fault:alarm-change"
           alarmDelete: "/nsp-fault:alarm-delete"
+          alarmCreate: "/nsp-fault:alarm-create"
 
       # 2) Choose which alarm node we will process; also set sourceEvent to that node
       - type: update
         compute:
           - set: alarmNode
-            expr: "alarmChange != null ? alarmChange : alarmDelete"
+            expr: "alarmChange != null ? alarmChange : (alarmCreate != null ? alarmCreate : alarmDelete)"
           - set: sourceEvent
             expr: "alarmNode"
+          - set: alarmEventKind
+            expr: "alarmDelete != null ? 'DELETE' : (alarmCreate != null ? 'CREATE' : (alarmChange != null ? 'CHANGE' : 'UNKNOWN'))"
 
-      # 3) Extract fields from alarmNode (works for alarm-change and alarm-delete)
+      # 3) Extract fields from alarmNode (common)
       - type: extract
         fromVar: alarmNode
         failOnMissing: true
@@ -207,7 +215,7 @@ transform:
           alarmType: "/alarmType"
           objectFullName: "/objectFullName"
 
-      # 4) Optional fields (NEVER fail startup/processing)
+      # 4) Optional fields (never fail)
       - type: extract
         fromVar: alarmNode
         failOnMissing: false
@@ -220,62 +228,38 @@ transform:
           serviceAffecting: "/serviceAffecting"
           fdn: "/fdn"
           objectId: "/objectId"
+          lastTimeDetected: "/lastTimeDetected"
+          originalSeverity: "/originalSeverity"
+          sourceSystem: "/sourceSystem"
 
-      # 5) Compute normalized / safe fields (prevents invalid JSON)
+      # 5) Compute normalized fields
       - type: update
         compute:
           - set: severity
             expr: "UPPER(COALESCE(severityNew, severityRaw))"
           - set: timestamp
-            expr: "timestampNew != null ? timestampNew : null"
+            expr: "timestampNew != null ? timestampNew : (lastTimeDetected != null ? lastTimeDetected : null)"
           - set: impactSafe
             expr: "impact != null ? impact : 0"
           - set: serviceAffectingSafe
             expr: "serviceAffecting == null ? 'null' : (serviceAffecting == true ? 'true' : 'false')"
           - set: type
-            expr: "alarmDelete != null ? 'CLEAR' : 'FAULT'"
+            expr: "alarmEventKind == 'DELETE' ? 'CLEAR' : (alarmEventKind == 'CHANGE' ? 'CHANGE' : (alarmEventKind == 'CREATE' ? 'FAULT' : 'UNKNOWN'))"
           - set: alarmIdentifier
             expr: "objectFullName != null ? objectFullName : faultId"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
-          - set: enrichedDataJson
-            expr: "'null'"
 
       - type: neNameEnrich
 
-      - type: template
+      # NEW: Build UnifiedEvent (writes final JSON to ctx.rendered / "$")
+      - type: unifiedEvent
         target: "$"
-        template: |
-          {
-            "sourceEms": "NSP_ATNOI",
-            "emsVendorID": "NSP",
-            "emsDomain": "${emsDomain}",
-            "serialNo": "${serialNo}",
-            "faultId": "${faultId}",
-            "neName": "${neName}",
-            "neEquipment": "${neId} | ${affectedObjectName}",
-            "type": "${type}",
-            "severity": "${severity}",
-            "timestamp": ${timestamp},
-            "sourceEvent": ${sourceEvent},
-            "metadata": {
-              "neId": "${neId}",
-              "fdn": "${fdn}",
-              "objectId": "${objectId}",
-              "emsDomainRaw": "${emsDomain}",
-              "probableCause": "${probableCause}",
-              "alarmType": "${alarmType}",
-              "impact": ${impactSafe},
-              "serviceAffecting": ${serviceAffectingSafe},
-              "objectFullName": "${objectFullName}"
-            },
-            "enrichedData": ${enrichedDataJson},
-            "alarmIdentifier": "${alarmIdentifier}"
-          }
 
   # ───────────────────────────── Sync flow (REST) ─────────────────────────────
   rest:
     pipeline:
+      # This flow already works on the alarm JSON directly.
       - type: extract
         failOnMissing: true
         failOnBadJson: true
@@ -302,7 +286,10 @@ transform:
           impact: "/impact"
           serviceAffecting: "/serviceAffecting"
           objectFullName: "/objectFullName"
+          originalSeverity: "/originalSeverity"
+          sourceSystem: "/sourceSystem"
 
+      # Normalize + also align vars for UnifiedEvent mapper (alarmNode/sourceEvent/alarmDelete)
       - type: update
         compute:
           - set: severity
@@ -319,40 +306,20 @@ transform:
             expr: "objectFullName != null ? objectFullName : faultId"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
-          - set: enrichedDataJson
-            expr: "'null'"
+          - set: alarmNode
+            expr: "sourceEvent"
+          - set: alarmDelete
+            expr: "nspFaultAlarmDelete"
+          - set: alarmChange
+            expr: "null"
+          - set: alarmCreate
+            expr: "null"
 
       - type: neNameEnrich
 
-      - type: template
+      # NEW: Build UnifiedEvent (writes final JSON to ctx.rendered / "$")
+      - type: unifiedEvent
         target: "$"
-        template: |
-          {
-            "sourceEms": "NSP_ATNOI",
-            "emsVendorID": "NSP",
-            "emsDomain": "${emsDomainNormalized}",
-            "serialNo": "${serialNo}",
-            "faultId": "${faultId}",
-            "neName": "${neName}",
-            "neEquipment": "${neId} | ${affectedObjectName}",
-            "type": "${type}",
-            "severity": "${severity}",
-            "timestamp": ${timestamp},
-            "sourceEvent": ${sourceEvent},
-            "metadata": {
-              "neId": "${neId}",
-              "fdn": "${fdn}",
-              "objectId": "${objectId}",
-              "emsDomainRaw": "${emsDomain}",
-              "probableCause": "${probableCause}",
-              "alarmType": "${alarmType}",
-              "impact": ${impactSafe},
-              "serviceAffecting": ${serviceAffectingSafe},
-              "objectFullName": "${objectFullName}"
-            },
-            "enrichedData": ${enrichedDataJson},
-            "alarmIdentifier": "${alarmIdentifier}"
-          }
 
 logging:
   level:
