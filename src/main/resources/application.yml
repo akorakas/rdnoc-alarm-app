@@ -156,7 +156,7 @@ spring:
 
 transform:
   placeholder: "{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}"
-  validate-on-start: true
+  validate-on-start: false
   # template validation is no longer relevant if you removed TemplateStep usage
   validate-template-on-start: false
 
