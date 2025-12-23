@@ -238,6 +238,8 @@ transform:
             expr: "objectFullName != null ? objectFullName : faultId"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
+          - set: enrichedDataJson
+            expr: "'null'"
 
       - type: neNameEnrich
 
@@ -254,7 +256,7 @@ transform:
             "neEquipment": "${neId} | ${affectedObjectName}",
             "type": "${type}",
             "severity": "${severity}",
-            "timestamp": ${timestampSec},
+            "timestamp": ${timestamp},
             "sourceEvent": ${sourceEvent},
             "metadata": {
               "neId": "${neId}",
@@ -267,7 +269,7 @@ transform:
               "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
-            "enrichedData": {enrichedDataJson},
+            "enrichedData": ${enrichedDataJson},
             "alarmIdentifier": "${alarmIdentifier}"
           }
 
@@ -317,6 +319,8 @@ transform:
             expr: "objectFullName != null ? objectFullName : faultId"
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
+          - set: enrichedDataJson
+            expr: "'null'"
 
       - type: neNameEnrich
 
@@ -333,7 +337,7 @@ transform:
             "neEquipment": "${neId} | ${affectedObjectName}",
             "type": "${type}",
             "severity": "${severity}",
-            "timestamp": ${timestampSec},
+            "timestamp": ${timestamp},
             "sourceEvent": ${sourceEvent},
             "metadata": {
               "neId": "${neId}",
@@ -346,7 +350,7 @@ transform:
               "serviceAffecting": ${serviceAffectingSafe},
               "objectFullName": "${objectFullName}"
             },
-            "enrichedData": {enrichedDataJson},
+            "enrichedData": ${enrichedDataJson},
             "alarmIdentifier": "${alarmIdentifier}"
           }
 

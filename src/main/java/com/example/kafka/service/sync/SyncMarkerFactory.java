@@ -13,17 +13,13 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * SyncMarkerFactory
  *
- * Χρησιμοποιεί το ΙΔΙΟ TemplateStep με το κανονικό pipeline
- * για να φτιάξει δύο ειδικά μηνύματα:
- *
+ * Uses the SAME TemplateStep as the normal pipeline to produce:
  *  - type = "SYNC_START"
  *  - type = "SYNC_END"
  *
- * Τα υπόλοιπα πεδία είναι κενά ("" ή null) εκτός από:
- *  - timestamp = System.currentTimeMillis()
- *  - sourceEvent = {} (κενό JSON object)
- *
- * Το TemplateStep γράφει το τελικό JSON στο ctx.rendered.
+ * Fixes:
+ *  - Ensure enrichedData is valid JSON by always setting enrichedDataJson = "null"
+ *  - Ensure all template-required vars exist (avoid blank substitutions that break JSON)
  */
 @Slf4j
 @Component
@@ -46,52 +42,62 @@ public class SyncMarkerFactory {
       ObjectNode emptyRoot = mapper.createObjectNode();
       TransformContext ctx = new TransformContext(emptyRoot);
 
-      // ---- Πεδία UnifiedEvent ----
+      // ----------------------------------------------------------------------
+      // Vars used by your YAML template
+      // ----------------------------------------------------------------------
 
-      // Από το template: "sourceEms": "NSP_ATNOI", "emsVendorID": "NSP"
-      // Αυτά είναι hard-coded στο template, άρα δεν χρειάζεται να τα βάλουμε εδώ.
-
-      // emsDomainNormalized που χρησιμοποιείται στο template
+      // Depending on which template is injected (kafka/rest), it may use emsDomain or emsDomainNormalized.
+      // Set both to be safe.
+      ctx.put("emsDomain", "UNKNOWN");
       ctx.put("emsDomainNormalized", "UNKNOWN");
 
-      // Βασικά πεδία – όλα κενά για SYNC markers
+      // Basic fields
       ctx.put("serialNo", "");
       ctx.put("faultId", "");
       ctx.put("neName", "");
       ctx.put("neId", "");
       ctx.put("affectedObjectName", "");
 
-      ctx.put("type", type);          // SYNC_START ή SYNC_END
-      ctx.put("severity", ""); // ή "" αν προτιμάς
+      // If your template uses ${alarmIdentifier} or ${objectFullName}
+      ctx.put("objectFullName", "");
 
-      // Unix timestamp now (ms)
+      // SYNC type & severity
+      ctx.put("type", type);
+      ctx.put("severity", "");
+
+      // timestamp in ms (numeric)
       ctx.put("timestamp", System.currentTimeMillis());
 
-      // Κενό sourceEvent = {}
-      ObjectNode emptySourceEvent = mapper.createObjectNode();
-      ctx.put("sourceEvent", emptySourceEvent);
+      // sourceEvent must be a JSON object (not a string)
+      ctx.put("sourceEvent", mapper.createObjectNode());
 
-      // ---- metadata fields που χρησιμοποιούνται στο template ----
+      // Metadata fields used in template
       ctx.put("fdn", "");
       ctx.put("objectId", "");
-      ctx.put("emsDomain", "");
       ctx.put("probableCause", "");
       ctx.put("alarmType", "");
       ctx.put("impactSafe", 0);
-      ctx.put("serviceAffectingSafe", false);
-      ctx.put("objectFullName", "");
 
-      // alarmIdentifier για SYNC markers – βάζω το type για να ξεχωρίζει
+      // Your template expects ${serviceAffectingSafe} to be a JSON boolean/null literal (no quotes).
+      // So put Boolean (will render true/false) or the string "null" if you want null.
+      ctx.put("serviceAffectingSafe", false);
+
+      // alarmIdentifier: use the type for easy filtering downstream
       ctx.put("alarmIdentifier", type);
 
-      // Τρέχουμε το ίδιο TemplateStep με το pipeline
+      // ✅ CRITICAL: your template uses: "enrichedData": ${enrichedDataJson}
+      // If this is missing, the output becomes: "enrichedData":
+      // so we MUST always define it as the literal null.
+      ctx.put("enrichedDataJson", "null");
+
+      // Run same TemplateStep
       templateStep.apply(ctx);
 
       if (ctx.rendered != null && !ctx.rendered.isBlank()) {
         return ctx.rendered;
       }
 
-      // Fallback ασφαλείας
+      // Fallback (should basically never happen now)
       log.warn("SyncMarkerFactory: ctx.rendered was null/blank for type={}", type);
       ObjectNode fallback = mapper.createObjectNode();
       fallback.put("sourceEms", "NSP_ATNOI");
@@ -105,7 +111,19 @@ public class SyncMarkerFactory {
       fallback.put("severity", "");
       fallback.put("timestamp", System.currentTimeMillis());
       fallback.set("sourceEvent", mapper.createObjectNode());
-      fallback.set("metadata", mapper.createObjectNode());
+
+      ObjectNode md = mapper.createObjectNode();
+      md.put("neId", "");
+      md.put("fdn", "");
+      md.put("objectId", "");
+      md.put("emsDomainRaw", "");
+      md.put("probableCause", "");
+      md.put("alarmType", "");
+      md.put("impact", 0);
+      md.put("serviceAffecting", false);
+      md.put("objectFullName", "");
+      fallback.set("metadata", md);
+
       fallback.putNull("enrichedData");
       fallback.put("alarmIdentifier", type);
 
