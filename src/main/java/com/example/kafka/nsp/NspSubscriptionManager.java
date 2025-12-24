@@ -32,6 +32,10 @@ public class NspSubscriptionManager {
   private final long topicWaitTimeoutMs;
   private final long topicWaitSleepMs;
 
+  /** ✅ Lock wait tuning (prevents “skip & never start consumer”) */
+  private final long lockWaitTimeoutMs;
+  private final long lockWaitSleepMs;
+
   private final AtomicBoolean busy = new AtomicBoolean(false);
 
   public NspSubscriptionManager(
@@ -41,7 +45,9 @@ public class NspSubscriptionManager {
       DynamicKafkaConsumer consumer,
       SyncCoordinator sync,
       @Value("${app.nsp.subscription.topic-wait-timeout-ms:180000}") long topicWaitTimeoutMs,
-      @Value("${app.nsp.subscription.topic-wait-sleep-ms:2000}") long topicWaitSleepMs
+      @Value("${app.nsp.subscription.topic-wait-sleep-ms:2000}") long topicWaitSleepMs,
+      @Value("${app.nsp.subscription.lock-wait-timeout-ms:60000}") long lockWaitTimeoutMs,
+      @Value("${app.nsp.subscription.lock-wait-sleep-ms:250}") long lockWaitSleepMs
   ) {
     this.nspClient = nspClient;
     this.stateStore = stateStore;
@@ -50,6 +56,8 @@ public class NspSubscriptionManager {
     this.sync = sync;
     this.topicWaitTimeoutMs = topicWaitTimeoutMs;
     this.topicWaitSleepMs = topicWaitSleepMs;
+    this.lockWaitTimeoutMs = lockWaitTimeoutMs;
+    this.lockWaitSleepMs = lockWaitSleepMs;
   }
 
   public void startFlow(String reason) throws Exception {
@@ -187,11 +195,28 @@ public class NspSubscriptionManager {
     }
   }
 
+  /**
+   * ✅ Blocking lock with timeout:
+   * - prevents “Skip startFlow: busy” from killing startup consumption
+   * - still prevents concurrent renew/sync/start from overlapping
+   */
   private <T> T withLock(String op, CheckedSupplier<T> fn) throws Exception {
-    if (!busy.compareAndSet(false, true)) {
-      log.warn("Skip {}: manager is busy (sync/renew/start already running)", op);
-      return null;
+    final long deadline = System.currentTimeMillis() + lockWaitTimeoutMs;
+
+    while (!busy.compareAndSet(false, true)) {
+      if (System.currentTimeMillis() >= deadline) {
+        log.warn("Skip {}: manager is busy after waiting {}ms", op, lockWaitTimeoutMs);
+        return null;
+      }
+      try {
+        TimeUnit.MILLISECONDS.sleep(lockWaitSleepMs);
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+        log.warn("Interrupted while waiting for manager lock (op={})", op);
+        return null;
+      }
     }
+
     try {
       return fn.get();
     } finally {

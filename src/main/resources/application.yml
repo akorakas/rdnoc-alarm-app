@@ -19,7 +19,7 @@ management:
       enabled: true
   metrics:
     tags:
-      app: rdnoc-alarm-app
+      app: rdnoc-alarm-app-prod
       instance: ${HOSTNAME:local}
 
 app:
@@ -33,7 +33,7 @@ app:
     mode: dynamic
     verify-input-topic: false
     verify-timeout-sec: 10
-    start-listeners-after-verify: false
+    start-listeners-after-verify: true
 
   sync:
     enabled: true
@@ -46,6 +46,8 @@ app:
     subscription:
       renew-initial-delay-ms: 60000
       create-on-startup: true
+      lock-wait-timeout-ms: 60000
+      lock-wait-sleep-ms: 250
 
       # IMPORTANT: this file must be writable by uid=999 inside the container
       state-file: /app/state/nsp-subscription-state.json
@@ -59,7 +61,7 @@ app:
   sinks:
     output:
       type: kafka
-      topic: atnoi-alarms
+      topic: atnoi-alarms-prod
     dlt:
       type: file
       file: /tmp/dlt.ndjson
@@ -70,11 +72,11 @@ app:
   rest:
     nsp:
       scheme: https
-      host: 172.17.52.133
+      host: 172.17.45.132
       alarms-array-path: "/response/data"
 
       auth:
-        basic: "bnNwcHJveHl1aTpLQGZrYVByb3ghYXRuMDFfbGFiOQ=="
+        basic: "bnNwcHJveHl1aTpLQGZrYVByb3ghYXRuMDFfbnNwNQ=="
         grant-type: "client_credentials"
 
       headers:
@@ -103,8 +105,8 @@ spring:
 
   kafka:
     consumer:
-      bootstrap-servers: 172.17.52.133:9192
-      group-id: apo07
+      bootstrap-servers: 172.17.45.132:9192
+      group-id: atnoi-alarms-01
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -121,7 +123,7 @@ spring:
         "[allow.auto.create.topics]": false
 
         "[security.protocol]": SSL
-        "[ssl.truststore.location]": "/app/certs/lab/nsp.truststore"
+        "[ssl.truststore.location]": "/app/certs/prod/nsp.truststore"
         "[ssl.truststore.password]": "NokiaNsp1!trust"
         "[ssl.truststore.type]": JKS
 
@@ -172,7 +174,8 @@ transform:
         failOnMissing: false
         failOnBadJson: true
         mappings:
-          notification: "/payload/data/ietf-restconf:notification"
+          notificationFromEnvelope: "/payload/data/ietf-restconf:notification"
+          notificationFromTopic: "/data/ietf-restconf:notification"
           notificationDirect: "/ietf-restconf:notification"
           rootDoc: "/"
 
@@ -180,7 +183,7 @@ transform:
       - type: update
         compute:
           - set: notification
-            expr: "notification != null ? notification : (notificationDirect != null ? notificationDirect : rootDoc)"
+            expr: "notificationFromEnvelope != null ? notificationFromEnvelope : (notificationFromTopic != null ? notificationFromTopic : (notificationDirect != null ? notificationDirect : rootDoc))"
 
       # 1) From the notification, pick alarm-change / alarm-delete / alarm-create
       - type: extract
@@ -197,9 +200,9 @@ transform:
       - type: update
         compute:
           - set: alarmNode
-            expr: "alarmChange != null ? alarmChange : alarmCreate"
+            expr: "alarmChange != null ? alarmChange : (alarmCreate != null ? alarmCreate : alarmDelete)"
           - set: sourceEvent
-            expr: "alarmNode != null ? alarmNode : alarmDelete"
+            expr: "alarmNode"
           - set: alarmEventKind
             expr: "alarmDelete != null ? 'DELETE' : (alarmCreate != null ? 'CREATE' : (alarmChange != null ? 'CHANGE' : 'UNKNOWN'))"
 
@@ -215,7 +218,7 @@ transform:
       - type: extract
         fromVar: alarmNode
         failOnMissing: false
-        failOnBadJson: true
+        failOnBadJson: false
         mappings:
           emsDomain: "/sourceType"
           faultId: "/alarmName"
@@ -343,3 +346,4 @@ logging:
     "[org.apache.kafka.common.network]": INFO
     "[org.springframework.kafka]": INFO
     # "[com.example.kafka]": DEBUG
+
