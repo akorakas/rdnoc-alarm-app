@@ -62,8 +62,8 @@ public class UnifiedEventMapper {
     ue.setNeName(firstNonBlank(neName, getText(sourceEventNode, "neName")));
 
     // Keep same style you used: neId | affectedObjectName
-    String neEquip =
-        (neId != null ? neId : "") + " | " + (affectedObjectName != null ? affectedObjectName : "");
+    String neEquip = (neId != null ? neId : "");
+      //  (neId != null ? neId : "") + " | " + (affectedObjectName != null ? affectedObjectName : "");
     ue.setNeEquipment(neEquip);
 
     ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId, serialNo));
