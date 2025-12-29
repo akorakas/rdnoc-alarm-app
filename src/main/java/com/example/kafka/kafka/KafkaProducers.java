@@ -23,59 +23,22 @@ public class KafkaProducers {
     this.template = template;
   }
 
-  /** Simple send using the configured serializers. (unchanged) */
-  public void send(String topic, String key, Object value) {
-    template.send(topic, key, value);
+  // --------------------------------------------------------------------------
+  // ✅ NEW: Always produce with:
+  //    key       = sourceEms (e.g. "NSP_ATNOI")
+  //    partition = EMSId.ordinal() (e.g. 30)
+  // --------------------------------------------------------------------------
+
+  /** Use when you already have UnifiedEvent (best). */
+  public void sendByEms(String topic, UnifiedEvent ue) {
+    String emsKey = (ue != null && ue.getSourceEms() != null) ? ue.getSourceEms().name() : null;
+    sendByEms(topic, emsKey, ue);
   }
 
-  // --------------------------------------------------------------------------
-  // NEW: Send UnifiedEvent with:
-  //  a) key = sourceEms (EMSId name)
-  //  b) partition = EMSId.ordinal()
-  // --------------------------------------------------------------------------
-
-  /** Send UnifiedEvent with key+partition derived from ue.getSourceEms(). */
-  public void sendUnifiedEvent(String topic, UnifiedEvent ue) {
-    String key = deriveKeyFromUnifiedEvent(ue);
-    Integer partition = derivePartitionFromKey(key);
-
-    ProducerRecord<String, Object> rec = new ProducerRecord<>(topic, partition, key, ue);
-    template.send(rec);
-
-    if (log.isDebugEnabled()) {
-      log.debug("Produced UE to {} (partition={}, key={})", topic, partition, key);
-    }
-  }
-
-  /** Send UnifiedEvent + keep source meta headers (ConsumerRecord). */
-  public void sendUnifiedEventWithSourceMeta(String topic, UnifiedEvent ue, ConsumerRecord<String, ?> src) {
-    String key = deriveKeyFromUnifiedEvent(ue);
-    Integer partition = derivePartitionFromKey(key);
-
-    ProducerRecord<String, Object> rec =
-        new ProducerRecord<>(topic, partition, src.timestamp(), key, ue, null);
-
-    addSourceMetaHeaders(rec, src);
-
-    template.send(rec);
-    if (log.isDebugEnabled()) {
-      log.debug("Produced UE to {} (partition={}, key={}) (src {}-{}@{})",
-          topic, partition, key, src.topic(), src.partition(), src.offset());
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // Keep your existing APIs, but add a new overload that ALSO forces partition
-  // based on EMSId mapping (when caller passes sourceEms explicitly).
-  // --------------------------------------------------------------------------
-
-  /**
-   * NEW overload: caller supplies sourceEms string (e.g. "NSP_ATNOI").
-   * Key will be sourceEms, partition will be EMSId.ordinal().
-   */
-  public void sendWithEmsPartition(String topic, String sourceEms, Object value) {
-    String key = sourceEms;
-    Integer partition = derivePartitionFromKey(key);
+  /** Use when you have JSON/string/etc but you know sourceEms. */
+  public void sendByEms(String topic, String sourceEms, Object value) {
+    String key = normalizeKey(sourceEms);
+    Integer partition = partitionFromKey(key);
 
     ProducerRecord<String, Object> rec = new ProducerRecord<>(topic, partition, key, value);
     template.send(rec);
@@ -85,37 +48,56 @@ public class KafkaProducers {
     }
   }
 
-  /** Same as above, but also attaches source meta headers. */
-  public void sendWithEmsPartitionAndSourceMeta(String topic, String sourceEms, Object value,
-                                                ConsumerRecord<String, ?> src) {
-    String key = sourceEms;
-    Integer partition = derivePartitionFromKey(key);
+  /** Kafka-flow: same as sendByEms, but also add source topic/partition/offset headers. */
+  public void sendByEmsWithSourceMeta(String topic, UnifiedEvent ue, ConsumerRecord<String, ?> src) {
+    String emsKey = (ue != null && ue.getSourceEms() != null) ? ue.getSourceEms().name() : null;
+    sendByEmsWithSourceMeta(topic, emsKey, ue, src);
+  }
+
+  /** Kafka-flow: same as above but you pass sourceEms explicitly (works with JSON strings too). */
+  public void sendByEmsWithSourceMeta(String topic, String sourceEms, Object value, ConsumerRecord<String, ?> src) {
+    String key = normalizeKey(sourceEms);
+    Integer partition = partitionFromKey(key);
 
     ProducerRecord<String, Object> rec =
-        new ProducerRecord<>(topic, partition, src.timestamp(), key, value, null);
+        new ProducerRecord<>(topic, partition, src != null ? src.timestamp() : null, key, value, null);
 
-    addSourceMetaHeaders(rec, src);
+    if (src != null) {
+      addSourceMetaHeaders(rec, src);
+    }
 
     template.send(rec);
+
     if (log.isDebugEnabled()) {
-      log.debug("Produced to {} (partition={}, key={}) (src {}-{}@{})",
-          topic, partition, key, src.topic(), src.partition(), src.offset());
+      if (src != null) {
+        log.debug("Produced to {} (partition={}, key={}) (src {}-{}@{})",
+            topic, partition, key, src.topic(), src.partition(), src.offset());
+      } else {
+        log.debug("Produced to {} (partition={}, key={})", topic, partition, key);
+      }
     }
   }
 
   // --------------------------------------------------------------------------
-  // Your existing methods (kept) - but they still use src.key() today.
-  // If you want those ALSO to use EMS partitioning, switch src.key() to derive.
+  // ⚠️ OLD methods (kept for compatibility, but NOT what you want for this use-case)
   // --------------------------------------------------------------------------
 
-  /** Send with source topic/partition/offset as headers (using a ConsumerRecord). */
+  /** Simple send using configured serializers. */
+  public void send(String topic, String key, Object value) {
+    template.send(topic, key, value);
+  }
+
+  /**
+   * OLD: This uses src.key() as output key -> that’s why your output key becomes subscriptionId.
+   * Keep it only if you really want to preserve the input key.
+   */
   public void sendWithSourceMeta(String topic, Object value, ConsumerRecord<String, ?> src) {
     ProducerRecord<String, Object> rec =
         new ProducerRecord<>(topic, null, src.timestamp(), src.key(), value, null);
 
     addSourceMetaHeaders(rec, src);
-
     template.send(rec);
+
     if (log.isDebugEnabled()) {
       log.debug("Produced to {} (src {}-{}@{})", topic, src.topic(), src.partition(), src.offset());
     }
@@ -137,6 +119,7 @@ public class KafkaProducers {
     }
 
     template.send(rec);
+
     if (log.isDebugEnabled()) {
       log.debug("Produced to {} (src {}-{}@{})", topic, srcTopic, srcPartition, srcOffset);
     }
@@ -147,29 +130,27 @@ public class KafkaProducers {
   // --------------------------------------------------------------------------
 
   private static void addSourceMetaHeaders(ProducerRecord<String, Object> rec, ConsumerRecord<String, ?> src) {
-    rec.headers().add("source-topic", src.topic().getBytes(StandardCharsets.UTF_8));
-    rec.headers().add("source-partition", Integer.toString(src.partition()).getBytes(StandardCharsets.UTF_8));
-    rec.headers().add("source-offset", Long.toString(src.offset()).getBytes(StandardCharsets.UTF_8));
+    rec.headers().add("kafka-topic", src.topic().getBytes(StandardCharsets.UTF_8));
+    if (src.key() != null) {
+      rec.headers().add("kafka-key", src.key().getBytes(StandardCharsets.UTF_8));
+    }
+    rec.headers().add("kafka-partition", Integer.toString(src.partition()).getBytes(StandardCharsets.UTF_8));
+    rec.headers().add("kafka-offset", Long.toString(src.offset()).getBytes(StandardCharsets.UTF_8));
+    rec.headers().add("source", "KAFKA".getBytes(StandardCharsets.UTF_8));
   }
 
-  /**
-   * Key should be the EMSId name (e.g. "NSP_ATNOI").
-   * Returns null if not available.
-   */
-  private static String deriveKeyFromUnifiedEvent(UnifiedEvent ue) {
-    if (ue == null || ue.getSourceEms() == null) return null;
-    // assuming getSourceEms() returns EMSId
-    return ue.getSourceEms().name();
+  private static String normalizeKey(String sourceEms) {
+    if (sourceEms == null) return null;
+    String k = sourceEms.trim();
+    return k.isEmpty() ? null : k;
   }
 
-  /**
-   * Partition = EMSId.ordinal(). If key is null/blank or not a valid EMSId, returns null (no forced partition).
-   */
-  private static Integer derivePartitionFromKey(String key) {
-    if (key == null || key.isBlank()) return null;
+  /** Partition = EMSId.ordinal(). If invalid/missing -> null (Kafka will choose). */
+  private static Integer partitionFromKey(String key) {
+    if (key == null) return null;
     try {
       return EMSId.valueOf(key).ordinal();
-    } catch (Exception ignore) {
+    } catch (Exception e) {
       return null;
     }
   }

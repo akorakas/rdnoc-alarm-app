@@ -2,7 +2,6 @@ package com.example.kafka.sink;
 
 import java.util.Map;
 
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
@@ -16,9 +15,17 @@ public class SinkRouter {
   private final ChannelSender errorSender;
 
   public SinkRouter(KafkaTemplate<String, Object> template, SinksProperties props) {
-    this.outputSender = buildSender(template, props.getOutput());
-    this.dltSender    = buildSender(template, props.getDlt());
-    this.errorSender  = buildSender(template, props.getError());
+
+    // OUTPUT: EMS-aware Kafka sender (forces key+partition from payload)
+    if ("file".equalsIgnoreCase(props.getOutput().getType())) {
+      this.outputSender = new FileChannelSender(props.getOutput().getFile());
+    } else {
+      this.outputSender = new EmsKafkaChannelSender(template, props.getOutput().getTopic());
+    }
+
+    // DLT/ERROR: keep as-is (no forced partitioning unless you want it)
+    this.dltSender   = buildSender(template, props.getDlt());
+    this.errorSender = buildSender(template, props.getError());
   }
 
   private static ChannelSender buildSender(KafkaTemplate<String, Object> template,
@@ -26,7 +33,6 @@ public class SinkRouter {
     if ("file".equalsIgnoreCase(ch.getType())) {
       return new FileChannelSender(ch.getFile());
     }
-    // default: kafka
     return new KafkaChannelSender(template, ch.getTopic());
   }
 
