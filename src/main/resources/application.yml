@@ -34,6 +34,10 @@ app:
     verify-input-topic: false
     verify-timeout-sec: 10
     start-listeners-after-verify: true
+    
+    output:
+      validate-partitions-on-startup: true
+      validate-partitions-timeout-sec: 10
 
   sync:
     enabled: true
@@ -61,7 +65,7 @@ app:
   sinks:
     output:
       type: kafka
-      topic: atnoi-alarms-prod
+      topic: nsp-atnoi-test-prod
     dlt:
       type: file
       file: /tmp/dlt.ndjson
