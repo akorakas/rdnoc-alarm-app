@@ -135,7 +135,8 @@ public class UnifiedEventMapper {
     return switch (type.toUpperCase()) {
       case "CLEAR" -> EventType.CLEAR;
       case "CHANGE" -> EventType.CHANGE;
-      case "FAULT", "FAULT_SYNC" -> EventType.FAULT;
+      case "FAULT" -> EventType.FAULT;
+      case "FAULT_SYNC" -> EventType.FAULT_SYNC;
       // if you ever pass SYNC_* through the pipeline, handle them too:
       case "SYNC_START" -> EventType.SYNC_START;
       case "SYNC_END" -> EventType.SYNC_END;
@@ -190,7 +191,7 @@ public class UnifiedEventMapper {
   private static EMSDomain mapDomain(String sourceType) {
     if (sourceType == null) return EMSDomain.UNKNOWN;
     return switch (sourceType.toLowerCase()) {
-      case "mdm" -> EMSDomain.IP;
+      case "mdm" -> EMSDomain.TRANSPORT;   // ✅ changed from IP to TRANSPORT
       default -> EMSDomain.UNKNOWN;
     };
   }
