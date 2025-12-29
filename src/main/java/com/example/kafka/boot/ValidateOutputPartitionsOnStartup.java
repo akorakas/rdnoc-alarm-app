@@ -2,12 +2,12 @@
 package com.example.kafka.boot;
 
 import java.time.Duration;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.DescribeTopicsResult;
 import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,7 +27,7 @@ public class ValidateOutputPartitionsOnStartup implements ApplicationRunner {
   private final AdminClient outputAdmin;
   private final SinksProperties sinks;
 
-  // ✅ default true to match your YAML intent (you can still disable in config)
+  // default true (matches your YAML intent)
   @Value("${app.kafka.output.validate-partitions-on-startup:true}")
   private boolean enabled;
 
@@ -56,13 +56,13 @@ public class ValidateOutputPartitionsOnStartup implements ApplicationRunner {
       return;
     }
 
-    String topic = sinks.getOutput().getTopic();
+    final String topic = sinks.getOutput().getTopic();
     if (topic == null || topic.isBlank()) {
       throw new IllegalStateException("Output sink is kafka but app.sinks.output.topic is empty.");
     }
 
-    int requiredPartitions = EMSId.values().length; // e.g. 31 (0..30)
-    long timeoutMs = Duration.ofSeconds(timeoutSec).toMillis();
+    final int requiredPartitions = EMSId.values().length; // e.g. 31 (0..30)
+    final long timeoutMs = Duration.ofSeconds(timeoutSec).toMillis();
 
     log.info("Validating output topic partitions: topic='{}', requiredPartitions={}, timeout={}s",
         topic, requiredPartitions, timeoutSec);
@@ -73,7 +73,7 @@ public class ValidateOutputPartitionsOnStartup implements ApplicationRunner {
     if (actualPartitions < requiredPartitions) {
       String msg =
           "FATAL: Output topic '" + topic + "' has " + actualPartitions + " partition(s) but the application requires at least "
-              + requiredPartitions + " (EMSId ordinals 0.." + (requiredPartitions - 1) + "). "
+              + requiredPartitions + " partition(s) (EMSId ordinals 0.." + (requiredPartitions - 1) + "). "
               + "Fix: increase partitions for topic '" + topic + "' on the OUTPUT Kafka cluster.";
       log.error(msg);
       throw new IllegalStateException(msg);
@@ -86,10 +86,11 @@ public class ValidateOutputPartitionsOnStartup implements ApplicationRunner {
   private TopicDescription describeTopic(String topic, long timeoutMs) throws Exception {
     try {
       DescribeTopicsResult res = outputAdmin.describeTopics(java.util.List.of(topic));
-      Map<String, TopicDescription> map =
-          res.allTopicNames().get(timeoutMs, TimeUnit.MILLISECONDS);
 
-      TopicDescription desc = map.get(topic);
+      // Prefer the per-topic future (cleaner missing-topic behavior)
+      TopicDescription desc =
+          res.values().get(topic).get(timeoutMs, TimeUnit.MILLISECONDS);
+
       if (desc == null) {
         throw new UnknownTopicOrPartitionException("Topic not found: " + topic);
       }
@@ -100,8 +101,16 @@ public class ValidateOutputPartitionsOnStartup implements ApplicationRunner {
 
       if (root instanceof UnknownTopicOrPartitionException) {
         String msg =
-            "FATAL: Output topic '" + topic + "' does not exist on OUTPUT Kafka cluster. "
+            "FATAL: Output topic '" + topic + "' does not exist on the OUTPUT Kafka cluster. "
                 + "Create it with >= " + EMSId.values().length + " partitions and restart.";
+        log.error(msg, e);
+        throw new IllegalStateException(msg, e);
+      }
+
+      if (root instanceof TopicAuthorizationException) {
+        String msg =
+            "FATAL: Not authorized to describe output topic '" + topic + "' on OUTPUT Kafka cluster. "
+                + "Fix ACLs for the producer principal (Describe/Read metadata on topic), then restart.";
         log.error(msg, e);
         throw new IllegalStateException(msg, e);
       }

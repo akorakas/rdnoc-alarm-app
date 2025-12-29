@@ -33,34 +33,23 @@ public class RequireTopics {
   private static final Logger log = LoggerFactory.getLogger(RequireTopics.class);
 
   /** Admin client for the INPUT cluster (built from spring.kafka.consumer.*) */
-  @Bean
-  @Qualifier("inputAdminClient")
+  @Bean(name = "inputAdminClient", destroyMethod = "close")
   public AdminClient inputAdminClient(KafkaProperties props) {
     Map<String, Object> cfg = new HashMap<>(props.buildConsumerProperties(null));
     return AdminClient.create(cfg);
   }
 
-  /** Admin client for the OUTPUT cluster (built from spring.kafka.producer.*) */
-  @Bean
-  @Qualifier("outputAdminClient")
-  public AdminClient outputAdminClient(KafkaProperties props) {
-    Map<String, Object> cfg = new HashMap<>(props.buildProducerProperties(null));
-    return AdminClient.create(cfg);
-  }
-
   @Bean
   public ApplicationRunner verifyAllTopics(
-      @Qualifier("inputAdminClient")  AdminClient inputAdmin,
+      @Qualifier("inputAdminClient") AdminClient inputAdmin,
+      // IMPORTANT: this now comes ONLY from KafkaAdminClientsConfig
       @Qualifier("outputAdminClient") AdminClient outputAdmin,
+
       KafkaListenerEndpointRegistry registry,
 
-      // NEW: mode static|dynamic
       @Value("${app.kafka.mode:dynamic}") String kafkaMode,
-
-      // Optional: only relevant in static mode
       @Value("${app.kafka.input-topic:}") String inputTopic,
 
-      // Flags
       @Value("${app.kafka.verify-input-topic:false}") boolean verifyInputTopic,
       @Value("${app.kafka.start-listeners-after-verify:false}") boolean startListenersAfterVerify,
 
@@ -77,7 +66,7 @@ public class RequireTopics {
       final boolean isDynamic = !isStatic; // default dynamic
 
       // 1) Verify both clusters are reachable
-      verifyClusterReachable(inputAdmin,  verifyTimeoutSec, "INPUT");
+      verifyClusterReachable(inputAdmin, verifyTimeoutSec, "INPUT");
       verifyClusterReachable(outputAdmin, verifyTimeoutSec, "OUTPUT");
 
       // 2) Input topic rules:
@@ -88,7 +77,6 @@ public class RequireTopics {
       if (isDynamic) {
         log.info("[INPUT] app.kafka.mode={} -> skipping input-topic verification (topic created at runtime).", mode);
       } else {
-        // static mode
         if (input == null || input.isBlank()) {
           throw new IllegalStateException("[INPUT] app.kafka.mode=static but app.kafka.input-topic is empty.");
         }
@@ -102,9 +90,9 @@ public class RequireTopics {
 
       // 3) Verify sink topics (kafka-only) on OUTPUT cluster
       Set<String> requiredOutput = new LinkedHashSet<>();
-      if (isKafka(sinksProps.getOutput().getType())) requiredOutput.add(trimOrNull(sinksProps.getOutput().getTopic()));
-      if (isKafka(sinksProps.getDlt().getType()))    requiredOutput.add(trimOrNull(sinksProps.getDlt().getTopic()));
-      if (isKafka(sinksProps.getError().getType()))  requiredOutput.add(trimOrNull(sinksProps.getError().getTopic()));
+      if (sinksProps.getOutput() != null && isKafka(sinksProps.getOutput().getType()))  requiredOutput.add(trimOrNull(sinksProps.getOutput().getTopic()));
+      if (sinksProps.getDlt() != null && isKafka(sinksProps.getDlt().getType()))  requiredOutput.add(trimOrNull(sinksProps.getDlt().getTopic()));
+      if (sinksProps.getError() != null && isKafka(sinksProps.getError().getType()))  requiredOutput.add(trimOrNull(sinksProps.getError().getTopic()));
       requiredOutput.removeIf(t -> t == null || t.isBlank());
 
       if (!requiredOutput.isEmpty()) {
@@ -114,7 +102,6 @@ public class RequireTopics {
       }
 
       // 4) Optional start listener containers
-      // In dynamic mode you typically do NOT want to start @KafkaListener registry
       if (startListenersAfterVerify && isStatic) {
         registry.start();
         log.info("Kafka listeners started after topic verification (static mode).");
