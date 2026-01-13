@@ -2,11 +2,14 @@
 package com.example.kafka.nsp;
 
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.DescribeTopicsResult;
+import org.apache.kafka.common.errors.TopicAuthorizationException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -60,8 +63,29 @@ public class NspSubscriptionManager {
     this.lockWaitSleepMs = lockWaitSleepMs;
   }
 
+  /**
+   * Startup entry:
+   * - If state exists but topic is CONFIRMED missing -> recreate immediately.
+   * - If Kafka is temporarily unreachable -> waitTopicExists() handles retry until timeout.
+   */
   public void startFlow(String reason) throws Exception {
     withLock("startFlow", () -> {
+
+      // If we have persisted state, validate it first.
+      Optional<NspSubscriptionState> existing = stateStore.load();
+      if (existing.isPresent()) {
+        NspSubscriptionState st = existing.get();
+        TopicStatus status = checkTopic(st.topicId());
+
+        if (status == TopicStatus.MISSING) {
+          log.warn("Startup: stored topic missing {} -> recreate", st.topicId());
+          recreate("startup-topic-missing");
+          return null;
+        }
+        // EXISTS -> proceed normally
+        // UNREACHABLE_OR_UNKNOWN -> proceed to waitTopicExists() (do not recreate based on connectivity)
+      }
+
       NspSubscriptionState state = ensureSubscription();
       waitTopicExists(state.topicId());
 
@@ -94,9 +118,16 @@ public class NspSubscriptionManager {
 
         NspSubscriptionState state = stateOpt.get();
 
-        if (!topicExists(state.topicId())) {
+        TopicStatus status = checkTopic(state.topicId());
+        if (status == TopicStatus.MISSING) {
           log.warn("Topic missing: {} -> recreate subscription", state.topicId());
           recreate("topic-missing");
+          return null;
+        } else if (status == TopicStatus.UNREACHABLE_OR_UNKNOWN) {
+          // Kafka unreachable/unknown: do NOT recreate (avoid spamming NSP).
+          // Just fail this tick; next tick will retry.
+          log.warn("Kafka/topic status unknown for {} (likely unreachable). Skipping renew this tick.",
+              state.topicId());
           return null;
         }
 
@@ -176,22 +207,55 @@ public class NspSubscriptionManager {
   private void waitTopicExists(String topic) throws Exception {
     long deadline = System.currentTimeMillis() + topicWaitTimeoutMs;
     while (System.currentTimeMillis() < deadline) {
-      if (topicExists(topic)) {
+      TopicStatus s = checkTopic(topic);
+      if (s == TopicStatus.EXISTS) {
         log.info("Topic exists: {}", topic);
         return;
       }
+      // If missing, do not throw here; the caller decides whether to recreate.
+      // We keep waiting because creation can be eventually consistent.
       TimeUnit.MILLISECONDS.sleep(topicWaitSleepMs);
     }
     throw new IllegalStateException("Timed out waiting for topic to exist: " + topic);
   }
 
+  /** For legacy callers; prefer checkTopic() so you don't mask connectivity as "missing". */
   private boolean topicExists(String topic) {
+    return checkTopic(topic) == TopicStatus.EXISTS;
+  }
+
+  private enum TopicStatus { EXISTS, MISSING, UNREACHABLE_OR_UNKNOWN }
+
+  /**
+   * Distinguish real "missing topic" from "Kafka unreachable / metadata timeout".
+   * IMPORTANT: Only treat MISSING as a signal to recreate subscriptions.
+   */
+  private TopicStatus checkTopic(String topic) {
     try {
-      DescribeTopicsResult res = inputAdmin.describeTopics(java.util.List.of(topic));
-      res.allTopicNames().get(5, TimeUnit.SECONDS);
-      return true;
+      inputAdmin.describeTopics(java.util.List.of(topic))
+          .allTopicNames()
+          .get(5, TimeUnit.SECONDS);
+      return TopicStatus.EXISTS;
+
+    } catch (ExecutionException ee) {
+      Throwable c = ee.getCause();
+      if (c instanceof UnknownTopicOrPartitionException) return TopicStatus.MISSING;
+
+      if (c instanceof TopicAuthorizationException) {
+        log.error("Not authorized to describe topic {}", topic, c);
+        return TopicStatus.UNREACHABLE_OR_UNKNOWN;
+      }
+
+      log.warn("DescribeTopics failed for {} (cause={})", topic, c.toString());
+      return TopicStatus.UNREACHABLE_OR_UNKNOWN;
+
+    } catch (TimeoutException te) {
+      log.warn("DescribeTopics timed out for {}", topic);
+      return TopicStatus.UNREACHABLE_OR_UNKNOWN;
+
     } catch (Exception e) {
-      return false;
+      log.warn("DescribeTopics failed for {}", topic, e);
+      return TopicStatus.UNREACHABLE_OR_UNKNOWN;
     }
   }
 
