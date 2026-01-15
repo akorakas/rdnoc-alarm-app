@@ -62,7 +62,7 @@ public class NspClient {
   @Value("${app.rest.nsp.headers.accept:application/json}")
   private String accept;
 
-  // Where the alarms array lives
+  // Where the alarms array lives (default works with /response/data)
   @Value("${app.rest.nsp.alarms-array-path:/response/data}")
   private String alarmsArrayPath;
 
@@ -99,22 +99,21 @@ public class NspClient {
   private int paginationLimit;
 
   /**
-   * Safety guard: prevents infinite loop if server always returns "full limit"
+   * Safety guard: prevents infinite loop if server behaves strangely
    * app.rest.nsp.pagination.max-pages=200
    */
   @Value("${app.rest.nsp.pagination.max-pages:200}")
   private int paginationMaxPages;
 
   /**
-   * Optional: single sort like:
+   * Optional: sort param(s)
+   * Example:
    *   app.rest.nsp.pagination.sort=lastTimeDetected,desc
    *
-   * Or multiple sorts separated by semicolon:
+   * Or multiple sorts separated by ';':
    *   app.rest.nsp.pagination.sort=productType,asc;version,desc
-   *
-   * (we will generate multiple &sort=... params)
    */
-  @Value("${app.rest.nsp.pagination.sort:}")
+  @Value("${app.rest.nsp.pagination.sort:lastTimeDetected,desc}")
   private String paginationSort;
 
   // ───────────────────────────────────────
@@ -180,11 +179,13 @@ public class NspClient {
       return splitAlarmEventsFromRaw(raw);
     }
 
-    // new behavior: offset/limit loop
+    // new behavior: offset/limit loop using NSP startRow/endRow/totalRows
     final int limit = Math.max(1, paginationLimit);
+
     int offset = 0;
     int page = 0;
 
+    int lastEndRow = -1;
     List<String> all = new ArrayList<>();
 
     while (true) {
@@ -194,24 +195,37 @@ public class NspClient {
         break;
       }
 
-      List<String> events = fetchActiveAlarmEventsPage(offset, limit);
+      AlarmPage alarmPage = fetchActiveAlarmPage(offset, limit);
 
-      if (events.isEmpty()) {
+      log.info("NSP pagination page meta: startRow={}, endRow={}, totalRows={}, count={}",
+          alarmPage.startRow(), alarmPage.endRow(), alarmPage.totalRows(), alarmPage.events().size());
+
+      // stop if empty
+      if (alarmPage.events().isEmpty()) {
         log.info("NSP pagination finished: empty page at offset={}, limit={}", offset, limit);
         break;
       }
 
-      all.addAll(events);
+      all.addAll(alarmPage.events());
 
-      log.info("NSP pagination page ok: offset={}, limit={}, events={}", offset, limit, events.size());
-
-      // stop rule: last page detected
-      if (events.size() < limit) {
-        log.info("NSP pagination finished: last page detected (count < limit). offset={}", offset);
+      // ✅ Correct stop rule: NSP tells us totalRows + endRow
+      if (alarmPage.totalRows() >= 0 && alarmPage.endRow() >= alarmPage.totalRows()) {
+        log.info("NSP pagination finished: endRow >= totalRows ({} >= {})",
+            alarmPage.endRow(), alarmPage.totalRows());
         break;
       }
 
-      offset += limit;
+      // ✅ Extra safety: ensure forward progress
+      if (alarmPage.endRow() <= lastEndRow) {
+        log.warn("NSP pagination safety stop: endRow did not increase (prevEndRow={}, endRow={}). offset={}",
+            lastEndRow, alarmPage.endRow(), offset);
+        break;
+      }
+
+      lastEndRow = alarmPage.endRow();
+
+      // ✅ Next offset MUST be endRow (not offset+limit)
+      offset = alarmPage.endRow();
     }
 
     log.info("NSP pagination finished: total events={}", all.size());
@@ -268,11 +282,34 @@ public class NspClient {
   }
 
   /**
-   * NEW: fetch one page and return a list of JSON strings (each alarm object).
+   * ✅ NEW: fetch one page and return AlarmPage metadata + alarm events list.
+   * Uses NSP pagination object:
+   *   response.startRow
+   *   response.endRow
+   *   response.totalRows
+   *   response.data[]
+   */
+  public AlarmPage fetchActiveAlarmPage(int offset, int limit) throws Exception {
+    String raw = fetchActiveAlarmsRawPage(offset, limit);
+    JsonNode root = objectMapper.readTree(raw);
+
+    JsonNode resp = root.path("response");
+    int startRow = resp.path("startRow").asInt(offset);
+    int endRow = resp.path("endRow").asInt(offset);
+    int totalRows = resp.path("totalRows").asInt(-1);
+
+    // Extract alarm objects from /response/data
+    List<String> events = splitAlarmEventsFromRaw(raw);
+
+    return new AlarmPage(startRow, endRow, totalRows, events);
+  }
+
+  /**
+   * NEW: fetch one page and return list of alarm JSON objects.
    */
   public List<String> fetchActiveAlarmEventsPage(int offset, int limit) throws Exception {
-    String raw = fetchActiveAlarmsRawPage(offset, limit);
-    return splitAlarmEventsFromRaw(raw);
+    AlarmPage page = fetchActiveAlarmPage(offset, limit);
+    return page.events();
   }
 
   /**
@@ -344,7 +381,7 @@ public class NspClient {
       hasQuery = true;
 
       // sort (optional)
-      appendSortParams(sb, hasQuery);
+      appendSortParams(sb);
     }
 
     return sb.toString();
@@ -357,16 +394,14 @@ public class NspClient {
    * - "lastTimeDetected,desc"
    * - "productType,asc;version,desc"
    */
-  private void appendSortParams(StringBuilder sb, boolean hasQueryAlready) {
+  private void appendSortParams(StringBuilder sb) {
     if (paginationSort == null || paginationSort.isBlank()) return;
 
-    // We accept multiple sorts separated by ';'
     String[] parts = paginationSort.split(";");
     for (String p : parts) {
       String s = p.trim();
       if (s.isEmpty()) continue;
 
-      // sort param value must be URL encoded
       String encoded = URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
       sb.append("&sort=").append(encoded);
     }
@@ -465,4 +500,9 @@ public class NspClient {
    * Minimal DTO for createSubscription response.
    */
   public record SubscriptionInfo(String subscriptionId, String topicId) {}
+
+  /**
+   * Page object for NSP pagination.
+   */
+  public record AlarmPage(int startRow, int endRow, int totalRows, List<String> events) {}
 }
