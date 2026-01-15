@@ -34,7 +34,7 @@ app:
     verify-input-topic: false
     verify-timeout-sec: 10
     start-listeners-after-verify: true
-    
+
     output:
       validate-partitions-on-startup: true
       validate-partitions-timeout-sec: 10
@@ -78,6 +78,11 @@ app:
       scheme: https
       host: 172.17.45.132
       alarms-array-path: "/response/data"
+      pagination:
+        enabled: true
+        limit: 1000
+        max-pages: 1000     # safety guard (optional)
+        sort: "lastTimeDetected,desc"   # optional
 
       auth:
         basic: "bnNwcHJveHl1aTpLQGZrYVByb3ghYXRuMDFfbnNwNQ=="
@@ -144,7 +149,7 @@ spring:
           org.apache.kafka.common.security.scram.ScramLoginModule required
           username="performance" password="tABYc79BRgTwTySU0rJM0lotoB25Mf";
         "[ssl.truststore.type]": PEM
-        "[ssl.truststore.location]": "/app/config/gr-kafka-dev-ca.crt"
+        "[ssl.truststore.location]": "/app/config/dnoc-dev-kafka-cluster-ca.crt"
 
         "[enable.idempotence]": true
         "[max.in.flight.requests.per.connection]": 5
@@ -242,11 +247,15 @@ transform:
         mappings:
           severityNew: "severity.new-value"
           severityRaw: "/severity"
-          timestampNew: "lastTimeDetected.new-value"
+          previousSeverityNew: "previousSeverity.new-value"
+          previousSeverityRaw: "/previousSeverity"
+          lastTimeDetectedNew: "lastTimeDetected.new-value"
+          lastTimeDetectedOld: "lastTimeDetected.old-value"
           impact: "/impact"
           serviceAffecting: "/serviceAffecting"
           fdn: "/fdn"
           objectId: "/objectId"
+          firstTimeDetected: "/firstTimeDetected"
           lastTimeDetected: "/lastTimeDetected"
           originalSeverity: "/originalSeverity"
           sourceSystem: "/sourceSystem"
@@ -256,14 +265,35 @@ transform:
         compute:
           - set: severity
             expr: "UPPER(COALESCE(severityNew, severityRaw))"
+          # ✅ Pick a scalar ms timestamp (prefer new-value, then old-value, then scalar)
+          - set: timestampMs
+            expr: "COALESCE(lastTimeDetectedNew, lastTimeDetectedOld, lastTimeDetected)"
+          # ✅ Force lastTimeDetected to be scalar (prevents mapper seeing an object and producing 0)
+          - set: lastTimeDetected
+            expr: "timestampMs"
+
           - set: timestamp
-            expr: "timestampNew != null ? timestampNew : (lastTimeDetected != null ? lastTimeDetected : null)"
+            expr: "timestampMs"
+
+          # ✅ Detect delta presence
+          - set: hasLastTimeDetectedDelta
+            expr: "lastTimeDetectedNew != null ? 'true' : (lastTimeDetectedOld != null ? 'true' : 'false')"
+
+          # ✅ Your requested logic:
+          #    - if delta exists -> CHANGE
+          #    - else if scalar exists -> FAULT
+          - set: changeType
+            expr: "hasLastTimeDetectedDelta == 'true' ? 'CHANGE' : (timestampMs != null ? 'FAULT' : 'UNKNOWN')"
+
+          - set: type
+            expr: "alarmEventKind == 'DELETE' ? 'CLEAR' : (alarmEventKind == 'CREATE' ? 'FAULT' : (alarmEventKind == 'CHANGE' ? changeType : 'UNKNOWN'))"
+
           - set: impactSafe
             expr: "impact != null ? impact : 0"
           - set: serviceAffectingSafe
             expr: "serviceAffecting == null ? 'null' : (serviceAffecting == true ? 'true' : 'false')"
-          - set: type
-            expr: "alarmEventKind == 'DELETE' ? 'CLEAR' : (alarmEventKind == 'CHANGE' ? 'CHANGE' : (alarmEventKind == 'CREATE' ? 'FAULT' : 'UNKNOWN'))"
+          - set: prevSeverity
+            expr: "UPPER(COALESCE(previousSeverityNew, previousSeverityRaw))"
           - set: alarmIdentifier
             expr: "objectFullName != null ? objectFullName : (faultId != null ? faultId : deleteObjectId)"
           - set: faultId
@@ -316,7 +346,8 @@ transform:
       - type: update
         compute:
           - set: severity
-            expr: "severity != null ? UPPER(severity) : null"
+            expr: "UPPER(COALESCE(originalSeverity, severity))"
+            #  expr: "originalSeverity != null ? UPPER(originalSeverity) : null"
           - set: type
             expr: "nspFaultAlarmDelete != null ? 'CLEAR' : (fdn != null ? 'FAULT_SYNC' : (objectId != null ? 'FAULT' : 'UNKNOWN'))"
           - set: emsDomainNormalized

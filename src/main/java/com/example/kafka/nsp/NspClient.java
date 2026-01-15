@@ -5,6 +5,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -45,7 +46,7 @@ public class NspClient {
   @Value("${app.rest.nsp.paths.alarms}")
   private String alarmsPath;
 
-  // NEW: subscriptions base path (used for create + renew)
+  // subscriptions base path (used for create + renew)
   @Value("${app.rest.nsp.paths.subscriptions:/nbi-notification/api/v1/notifications/subscriptions}")
   private String subscriptionsPath;
 
@@ -69,7 +70,7 @@ public class NspClient {
   @Value("${app.rest.nsp.alarm-filter:}")
   private String alarmFilter;
 
-  // Subscription request payload parts (optional, but handy)
+  // Subscription request payload parts
   @Value("${app.rest.nsp.subscription.category-name:NSP-FAULT}")
   private String subscriptionCategoryName;
 
@@ -78,6 +79,43 @@ public class NspClient {
 
   @Value("${app.rest.nsp.subscription.property-filter:affectedObjectType NOT LIKE 'NmsSystem'}")
   private String subscriptionPropertyFilter;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Pagination (NEW)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Turn pagination ON/OFF for snapshot sync:
+   * app.rest.nsp.pagination.enabled=true
+   */
+  @Value("${app.rest.nsp.pagination.enabled:false}")
+  private boolean paginationEnabled;
+
+  /**
+   * Page size
+   * app.rest.nsp.pagination.limit=1000
+   */
+  @Value("${app.rest.nsp.pagination.limit:1000}")
+  private int paginationLimit;
+
+  /**
+   * Safety guard: prevents infinite loop if server always returns "full limit"
+   * app.rest.nsp.pagination.max-pages=200
+   */
+  @Value("${app.rest.nsp.pagination.max-pages:200}")
+  private int paginationMaxPages;
+
+  /**
+   * Optional: single sort like:
+   *   app.rest.nsp.pagination.sort=lastTimeDetected,desc
+   *
+   * Or multiple sorts separated by semicolon:
+   *   app.rest.nsp.pagination.sort=productType,asc;version,desc
+   *
+   * (we will generate multiple &sort=... params)
+   */
+  @Value("${app.rest.nsp.pagination.sort:}")
+  private String paginationSort;
 
   // ───────────────────────────────────────
 
@@ -127,27 +165,66 @@ public class NspClient {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  ACTIVE ALARMS (REST snapshot)
+  // ACTIVE ALARMS (REST snapshot) + Pagination
   // ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Backwards-compatible method:
+   * - If pagination is enabled -> loops through pages using offset/limit
+   * - Else -> performs single call (old behavior)
+   */
+  public List<String> fetchActiveAlarmEvents() throws Exception {
+    if (!paginationEnabled) {
+      // old behavior (single call)
+      String raw = fetchActiveAlarmsRaw();
+      return splitAlarmEventsFromRaw(raw);
+    }
+
+    // new behavior: offset/limit loop
+    final int limit = Math.max(1, paginationLimit);
+    int offset = 0;
+    int page = 0;
+
+    List<String> all = new ArrayList<>();
+
+    while (true) {
+      page++;
+      if (page > paginationMaxPages) {
+        log.warn("NSP pagination safety stop: reached max-pages={} at offset={}", paginationMaxPages, offset);
+        break;
+      }
+
+      List<String> events = fetchActiveAlarmEventsPage(offset, limit);
+
+      if (events.isEmpty()) {
+        log.info("NSP pagination finished: empty page at offset={}, limit={}", offset, limit);
+        break;
+      }
+
+      all.addAll(events);
+
+      log.info("NSP pagination page ok: offset={}, limit={}, events={}", offset, limit, events.size());
+
+      // stop rule: last page detected
+      if (events.size() < limit) {
+        log.info("NSP pagination finished: last page detected (count < limit). offset={}", offset);
+        break;
+      }
+
+      offset += limit;
+    }
+
+    log.info("NSP pagination finished: total events={}", all.size());
+    return all;
+  }
+
+  /**
+   * Old single-call raw fetch (no offset/limit).
+   */
   public String fetchActiveAlarmsRaw() throws Exception {
     String token = getAccessToken();
 
-    // If no filter configured, call endpoint without alarmFilter
-    String url;
-    if (alarmFilter == null || alarmFilter.isBlank()) {
-      url = baseUrl() + alarmsPath;
-    } else {
-      // URL-encode once; URLEncoder turns spaces into '+'
-      String onceEncoded = URLEncoder.encode(alarmFilter, StandardCharsets.UTF_8);
-      // Replace '+' with '%20' for curl-like style
-      String encodedForNsp = onceEncoded.replace("+", "%20");
-      url = baseUrl() + alarmsPath + "?alarmFilter=" + encodedForNsp;
-
-      log.info("NSP alarms raw filter   : {}", alarmFilter);
-      log.info("NSP alarms encoded      : {}", encodedForNsp);
-    }
-
+    String url = buildAlarmsUrl(null, null);
     log.info("NSP alarms request URL  : {}", url);
 
     HttpHeaders headers = new HttpHeaders();
@@ -165,8 +242,44 @@ public class NspClient {
     return response.getBody();
   }
 
-  public List<String> fetchActiveAlarmEvents() throws Exception {
-    String raw = fetchActiveAlarmsRaw();
+  /**
+   * NEW: paged raw fetch (offset/limit + optional sort).
+   */
+  public String fetchActiveAlarmsRawPage(int offset, int limit) throws Exception {
+    String token = getAccessToken();
+
+    String url = buildAlarmsUrl(offset, limit);
+
+    log.info("NSP alarms page request URL: {}", url);
+
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(token);
+    headers.setAccept(List.of(MediaType.valueOf(accept)));
+    headers.setContentType(MediaType.valueOf(contentType));
+
+    HttpEntity<Void> request = new HttpEntity<>(headers);
+    ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
+
+    if (!response.getStatusCode().is2xxSuccessful()) {
+      throw new IllegalStateException("NSP alarms page request failed: " + response.getStatusCode());
+    }
+
+    return response.getBody();
+  }
+
+  /**
+   * NEW: fetch one page and return a list of JSON strings (each alarm object).
+   */
+  public List<String> fetchActiveAlarmEventsPage(int offset, int limit) throws Exception {
+    String raw = fetchActiveAlarmsRawPage(offset, limit);
+    return splitAlarmEventsFromRaw(raw);
+  }
+
+  /**
+   * Extracts alarms array from raw JSON using alarmsArrayPath.
+   * If not found, falls back to root array or returns single raw payload.
+   */
+  private List<String> splitAlarmEventsFromRaw(String raw) throws Exception {
     JsonNode root = objectMapper.readTree(raw);
     List<String> result = new ArrayList<>();
 
@@ -184,35 +297,88 @@ public class NspClient {
         result.add(objectMapper.writeValueAsString(node));
       }
       log.info("NSP: split {} alarm(s) from {}", result.size(), alarmsArrayPath);
-    } else if (root.isArray()) {
+      return result;
+    }
+
+    if (root.isArray()) {
       for (JsonNode node : root) {
         result.add(objectMapper.writeValueAsString(node));
       }
       log.warn("NSP: alarms-array-path {} did not resolve to array, used root array instead", alarmsArrayPath);
-    } else {
-      log.warn("NSP: alarms-array-path {} did not resolve to array; returning single raw payload", alarmsArrayPath);
-      result.add(raw);
+      return result;
     }
 
-    return result;
+    log.warn("NSP: alarms-array-path {} did not resolve to array; returning single raw payload", alarmsArrayPath);
+    return Collections.singletonList(raw);
+  }
+
+  /**
+   * Builds /alarms/details URL with optional:
+   * - alarmFilter
+   * - offset
+   * - limit
+   * - sort (one or more)
+   */
+  private String buildAlarmsUrl(Integer offset, Integer limit) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(baseUrl()).append(alarmsPath);
+
+    boolean hasQuery = false;
+
+    // alarmFilter
+    if (alarmFilter != null && !alarmFilter.isBlank()) {
+      String onceEncoded = URLEncoder.encode(alarmFilter, StandardCharsets.UTF_8).replace("+", "%20");
+      sb.append(hasQuery ? "&" : "?");
+      sb.append("alarmFilter=").append(onceEncoded);
+      hasQuery = true;
+
+      log.info("NSP alarms raw filter   : {}", alarmFilter);
+      log.info("NSP alarms encoded      : {}", onceEncoded);
+    }
+
+    // offset/limit
+    if (offset != null && limit != null) {
+      sb.append(hasQuery ? "&" : "?");
+      sb.append("offset=").append(offset);
+      sb.append("&limit=").append(limit);
+      hasQuery = true;
+
+      // sort (optional)
+      appendSortParams(sb, hasQuery);
+    }
+
+    return sb.toString();
+  }
+
+  /**
+   * Appends one or more &sort= parameters.
+   *
+   * Accepts:
+   * - "lastTimeDetected,desc"
+   * - "productType,asc;version,desc"
+   */
+  private void appendSortParams(StringBuilder sb, boolean hasQueryAlready) {
+    if (paginationSort == null || paginationSort.isBlank()) return;
+
+    // We accept multiple sorts separated by ';'
+    String[] parts = paginationSort.split(";");
+    for (String p : parts) {
+      String s = p.trim();
+      if (s.isEmpty()) continue;
+
+      // sort param value must be URL encoded
+      String encoded = URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
+      sb.append("&sort=").append(encoded);
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  SUBSCRIPTION CREATE + RENEW (replaces your shell scripts)
+  // SUBSCRIPTION CREATE + RENEW
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Create an NSP notification subscription.
    * Returns (subscriptionId, topicId).
-   *
-   * Matches your curl body:
-   * {
-   *   "categories": [{
-   *     "advancedFilter": "{...}",
-   *     "propertyFilter": "affectedObjectType NOT LIKE 'NmsSystem'",
-   *     "name": "NSP-FAULT"
-   *   }]
-   * }
    */
   public SubscriptionInfo createSubscription() throws Exception {
     String token = getAccessToken();
@@ -225,7 +391,7 @@ public class NspClient {
     headers.setContentType(MediaType.APPLICATION_JSON);
     headers.setAccept(List.of(MediaType.valueOf(accept)));
 
-    // Build JSON string safely (we keep it as String so you can exactly match NSP expectations)
+    // Build JSON string safely
     // advancedFilter must be a JSON string inside JSON => must be quoted/escaped.
     String bodyJson = """
       {
@@ -247,7 +413,9 @@ public class NspClient {
     ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
 
     if (!response.getStatusCode().is2xxSuccessful()) {
-      throw new IllegalStateException("NSP create subscription failed: " + response.getStatusCode() + " body=" + response.getBody());
+      throw new IllegalStateException(
+          "NSP create subscription failed: " + response.getStatusCode() + " body=" + response.getBody()
+      );
     }
 
     JsonNode root = objectMapper.readTree(response.getBody());
@@ -285,7 +453,9 @@ public class NspClient {
     ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
 
     if (!response.getStatusCode().is2xxSuccessful()) {
-      throw new IllegalStateException("NSP renew subscription failed: " + response.getStatusCode() + " body=" + response.getBody());
+      throw new IllegalStateException(
+          "NSP renew subscription failed: " + response.getStatusCode() + " body=" + response.getBody()
+      );
     }
 
     log.info("NSP subscription renewed: subscriptionId={}", subscriptionId);
