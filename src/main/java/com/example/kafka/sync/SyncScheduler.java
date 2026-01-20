@@ -21,7 +21,7 @@ public class SyncScheduler {
 
   @Scheduled(
       fixedDelayString = "${app.sync.fixed-delay-ms:60000}",
-      initialDelayString = "${app.sync.initial-delay-ms:0}"
+      initialDelayString = "${app.sync.initial-delay-ms:60000}"
   )
   public void scheduledSync() {
     if (!syncEnabled) return;

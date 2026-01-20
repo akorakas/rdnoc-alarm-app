@@ -1,6 +1,7 @@
 // src/main/java/com/example/kafka/nsp/NspSubscriptionManager.java
 package com.example.kafka.nsp;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -26,12 +27,13 @@ public class NspSubscriptionManager {
   private final NspClient nspClient;
   private final SubscriptionStateStore stateStore;
 
-  /** ✅ Injected INPUT AdminClient (built from spring.kafka.consumer.*). Do NOT close per call. */
+  /** ✅ INPUT AdminClient (built from spring.kafka.consumer.*). Do NOT close per call. */
   private final AdminClient inputAdmin;
 
   private final DynamicKafkaConsumer consumer;
   private final SyncCoordinator sync;
 
+  /** ✅ Topic wait tuning */
   private final long topicWaitTimeoutMs;
   private final long topicWaitSleepMs;
 
@@ -39,7 +41,19 @@ public class NspSubscriptionManager {
   private final long lockWaitTimeoutMs;
   private final long lockWaitSleepMs;
 
+  /**
+   * ✅ Manager lock:
+   * - prevents overlap between start/sync/renew
+   * - but still allows sequential operations
+   */
   private final AtomicBoolean busy = new AtomicBoolean(false);
+
+  /**
+   * ✅ Startup guard:
+   * Prevents Scheduled sync from running BEFORE startup flow completes
+   * (otherwise you get 2 snapshots on boot: scheduler + startup).
+   */
+  private final AtomicBoolean startupCompleted = new AtomicBoolean(false);
 
   public NspSubscriptionManager(
       NspClient nspClient,
@@ -63,10 +77,18 @@ public class NspSubscriptionManager {
     this.lockWaitSleepMs = lockWaitSleepMs;
   }
 
+  /** Useful if you want to expose readiness status elsewhere */
+  public boolean isStartupCompleted() {
+    return startupCompleted.get();
+  }
+
   /**
    * Startup entry:
    * - If state exists but topic is CONFIRMED missing -> recreate immediately.
    * - If Kafka is temporarily unreachable -> waitTopicExists() handles retry until timeout.
+   *
+   * IMPORTANT:
+   * This method DOES A SNAPSHOT SYNC (sync.runSync()) and then starts consuming the NSP topic.
    */
   public void startFlow(String reason) throws Exception {
     withLock("startFlow", () -> {
@@ -80,22 +102,43 @@ public class NspSubscriptionManager {
         if (status == TopicStatus.MISSING) {
           log.warn("Startup: stored topic missing {} -> recreate", st.topicId());
           recreate("startup-topic-missing");
+          startupCompleted.set(true);
           return null;
         }
         // EXISTS -> proceed normally
         // UNREACHABLE_OR_UNKNOWN -> proceed to waitTopicExists() (do not recreate based on connectivity)
       }
 
+      // Ensure subscription exists (create if missing)
       NspSubscriptionState state = ensureSubscription();
+
+      // Wait for Kafka topic to exist (eventual consistency)
       waitTopicExists(state.topicId());
 
+      // Run snapshot sync while consumer paused (if running)
       syncWithConsumerPaused(reason);
+
+      // Start consumer on the subscription topic
       startConsumerOn(state.topicId());
+
+      startupCompleted.set(true);
       return null;
     });
   }
 
+  /**
+   * Periodic sync entry called by SyncScheduler:
+   * IMPORTANT:
+   * - Skips until startup flow completes (prevents 2 snapshots on boot)
+   * - Executes snapshot sync with consumer paused/resumed safely
+   */
   public void runPeriodicSync(String reason) {
+    // ✅ CRITICAL: prevents "scheduled sync" firing before startup flow finishes
+    if (!startupCompleted.get()) {
+      log.info("Periodic sync skipped (startup not completed yet). reason={}", reason);
+      return;
+    }
+
     try {
       withLock("periodicSync", () -> {
         syncWithConsumerPaused(reason);
@@ -106,6 +149,10 @@ public class NspSubscriptionManager {
     }
   }
 
+  /**
+   * Renew / recreate logic (if you have an external scheduler calling it).
+   * Safe: will not recreate when Kafka is unreachable.
+   */
   public void renewOrRecreate() {
     try {
       withLock("renew", () -> {
@@ -165,12 +212,23 @@ public class NspSubscriptionManager {
   private void recreate(String reason) throws Exception {
     log.warn("Recreating subscription. reason={}", reason);
 
-    consumer.stop();
+    // stop consumer (if any)
+    try {
+      consumer.stop();
+    } catch (Exception e) {
+      log.warn("Consumer stop failed during recreate (continuing).", e);
+    }
+
+    // clear stored subscription info
     stateStore.clear();
 
+    // create new subscription
     var state = ensureSubscription();
+
+    // wait for topic existence
     waitTopicExists(state.topicId());
 
+    // run sync and start consumer
     syncWithConsumerPaused("recreate-" + reason);
     startConsumerOn(state.topicId());
   }
@@ -195,7 +253,8 @@ public class NspSubscriptionManager {
 
   private void startConsumerOn(String topic) {
     String current = consumer.currentTopic();
-    if (consumer.isRunning() && topic.equals(current)) {
+
+    if (consumer.isRunning() && topic != null && topic.equals(current)) {
       log.info("Consumer already running on topic {}", topic);
       return;
     }
@@ -206,20 +265,25 @@ public class NspSubscriptionManager {
 
   private void waitTopicExists(String topic) throws Exception {
     long deadline = System.currentTimeMillis() + topicWaitTimeoutMs;
+
     while (System.currentTimeMillis() < deadline) {
       TopicStatus s = checkTopic(topic);
+
       if (s == TopicStatus.EXISTS) {
         log.info("Topic exists: {}", topic);
         return;
       }
-      // If missing, do not throw here; the caller decides whether to recreate.
-      // We keep waiting because creation can be eventually consistent.
+
+      // If missing, do not throw here; we keep waiting because creation can be eventually consistent.
+      // If unreachable, also keep waiting (until timeout).
       TimeUnit.MILLISECONDS.sleep(topicWaitSleepMs);
     }
+
     throw new IllegalStateException("Timed out waiting for topic to exist: " + topic);
   }
 
   /** For legacy callers; prefer checkTopic() so you don't mask connectivity as "missing". */
+  @SuppressWarnings("unused")
   private boolean topicExists(String topic) {
     return checkTopic(topic) == TopicStatus.EXISTS;
   }
@@ -232,13 +296,14 @@ public class NspSubscriptionManager {
    */
   private TopicStatus checkTopic(String topic) {
     try {
-      inputAdmin.describeTopics(java.util.List.of(topic))
+      inputAdmin.describeTopics(List.of(topic))
           .allTopicNames()
           .get(5, TimeUnit.SECONDS);
       return TopicStatus.EXISTS;
 
     } catch (ExecutionException ee) {
       Throwable c = ee.getCause();
+
       if (c instanceof UnknownTopicOrPartitionException) return TopicStatus.MISSING;
 
       if (c instanceof TopicAuthorizationException) {
