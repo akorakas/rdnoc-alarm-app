@@ -43,7 +43,7 @@ app:
     enabled: true
     run-on-startup: true
     fixed-delay-ms: 28800000   # 8 hours
-    initial-delay-ms: 0
+    initial-delay-ms: 60000
     skip-if-running: true
 
   nsp:

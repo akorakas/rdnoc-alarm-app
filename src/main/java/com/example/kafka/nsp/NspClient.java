@@ -228,7 +228,7 @@ public class NspClient {
 
   /**
    * Backwards-compatible method:
-   * - If pagination is enabled -> loops through pages using offset/limit (or startRow/endRow)
+   * - If pagination is enabled -> loops through pages using OFFSET_LIMIT or START_END
    * - Else -> performs single call (old behavior)
    */
   public List<String> fetchActiveAlarmEvents() throws Exception {
