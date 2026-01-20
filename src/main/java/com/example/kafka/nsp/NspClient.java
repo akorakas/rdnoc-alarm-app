@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -81,6 +82,46 @@ public class NspClient {
   @Value("${app.rest.nsp.alarm-filter-double-encode:true}")
   private boolean alarmFilterDoubleEncode;
 
+  // Optional sort (one or more)
+  @Value("${app.rest.nsp.sort:lastTimeDetected,desc}")
+  private String sortParam;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Cursor-pagination (RECOMMENDED for your NSP)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Turn cursor pagination ON/OFF for snapshot sync:
+   * app.rest.nsp.cursor-pagination.enabled=true
+   */
+  @Value("${app.rest.nsp.cursor-pagination.enabled:true}")
+  private boolean cursorPaginationEnabled;
+
+  /**
+   * Max pages safety guard (prevents infinite loops)
+   */
+  @Value("${app.rest.nsp.cursor-pagination.max-pages:50}")
+  private int cursorMaxPages;
+
+  /**
+   * Max alarms to fetch overall (extra safety guard)
+   */
+  @Value("${app.rest.nsp.cursor-pagination.max-total:200000}")
+  private int cursorMaxTotal;
+
+  /**
+   * Cursor field (in your NSP it is numeric ms epoch)
+   */
+  @Value("${app.rest.nsp.cursor-pagination.field:lastTimeDetected}")
+  private String cursorField;
+
+  /**
+   * Deduplicate using a stable key.
+   * If your payload has alarmId/faultId/id, it will use those.
+   */
+  @Value("${app.rest.nsp.cursor-pagination.dedupe:true}")
+  private boolean cursorDedupeEnabled;
+
   // Subscription request payload parts
   @Value("${app.rest.nsp.subscription.category-name:NSP-FAULT}")
   private String subscriptionCategoryName;
@@ -90,65 +131,6 @@ public class NspClient {
 
   @Value("${app.rest.nsp.subscription.property-filter:affectedObjectType NOT LIKE 'NmsSystem'}")
   private String subscriptionPropertyFilter;
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Pagination
-  // ─────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Turn pagination ON/OFF for snapshot sync:
-   * app.rest.nsp.pagination.enabled=true
-   */
-  @Value("${app.rest.nsp.pagination.enabled:false}")
-  private boolean paginationEnabled;
-
-  /**
-   * Page size
-   * app.rest.nsp.pagination.limit=1000
-   */
-  @Value("${app.rest.nsp.pagination.limit:1000}")
-  private int paginationLimit;
-
-  /**
-   * Safety guard: prevents infinite loop if server behaves strangely
-   * app.rest.nsp.pagination.max-pages=200
-   */
-  @Value("${app.rest.nsp.pagination.max-pages:200}")
-  private int paginationMaxPages;
-
-  /**
-   * Optional: sort param(s)
-   * Example:
-   *   app.rest.nsp.pagination.sort=lastTimeDetected,desc
-   *
-   * Or multiple sorts separated by ';':
-   *   app.rest.nsp.pagination.sort=productType,asc;version,desc
-   */
-  @Value("${app.rest.nsp.pagination.sort:lastTimeDetected,desc}")
-  private String paginationSort;
-
-  /**
-   * Pagination mode:
-   *
-   * OFFSET_LIMIT:
-   *   ?offset=0&limit=1000
-   *
-   * START_END:
-   *   ?startRow=0&endRow=1000
-   *
-   * IMPORTANT:
-   * Your logs showed NSP ignores offset (returns startRow=0 again),
-   * so use START_END mode for this endpoint/build:
-   *
-   * app.rest.nsp.pagination.mode=START_END
-   */
-  public enum PaginationMode {
-    OFFSET_LIMIT,
-    START_END
-  }
-
-  @Value("${app.rest.nsp.pagination.mode:OFFSET_LIMIT}")
-  private PaginationMode paginationMode;
 
   // ───────────────────────────────────────
 
@@ -223,78 +205,108 @@ public class NspClient {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ACTIVE ALARMS (REST snapshot) + Pagination
+  // ACTIVE ALARMS (REST snapshot) - Cursor pagination
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Backwards-compatible method:
-   * - If pagination is enabled -> loops through pages using OFFSET_LIMIT or START_END
-   * - Else -> performs single call (old behavior)
+   * Fetch active alarms as individual alarm JSON strings.
+   * Uses cursor pagination by default, because your NSP ignores offset/limit.
    */
   public List<String> fetchActiveAlarmEvents() throws Exception {
-    if (!paginationEnabled) {
-      String raw = fetchActiveAlarmsRaw();
+    if (!cursorPaginationEnabled) {
+      // single call
+      String raw = fetchActiveAlarmsRaw(null);
       return splitAlarmEventsFromRaw(raw);
     }
-
-    final int limit = Math.max(1, paginationLimit);
-
-    int offset = 0;
-    int page = 0;
-
-    int lastEndRow = -1;
-    List<String> all = new ArrayList<>();
-
-    while (true) {
-      page++;
-      if (page > paginationMaxPages) {
-        log.warn("NSP pagination safety stop: reached max-pages={} at offset={}", paginationMaxPages, offset);
-        break;
-      }
-
-      AlarmPage alarmPage = fetchActiveAlarmPage(offset, limit);
-
-      log.info("NSP pagination page meta: startRow={}, endRow={}, totalRows={}, count={}",
-          alarmPage.startRow(), alarmPage.endRow(), alarmPage.totalRows(), alarmPage.events().size());
-
-      if (alarmPage.events().isEmpty()) {
-        log.info("NSP pagination finished: empty page at offset={}, limit={}", offset, limit);
-        break;
-      }
-
-      all.addAll(alarmPage.events());
-
-      // Stop if we reached end
-      if (alarmPage.totalRows() >= 0 && alarmPage.endRow() >= alarmPage.totalRows()) {
-        log.info("NSP pagination finished: endRow >= totalRows ({} >= {})",
-            alarmPage.endRow(), alarmPage.totalRows());
-        break;
-      }
-
-      // Safety: ensure forward progress
-      if (alarmPage.endRow() <= lastEndRow) {
-        log.warn("NSP pagination safety stop: endRow did not increase (prevEndRow={}, endRow={}). offset={}",
-            lastEndRow, alarmPage.endRow(), offset);
-        break;
-      }
-
-      lastEndRow = alarmPage.endRow();
-
-      // Next offset must be endRow
-      offset = alarmPage.endRow();
-    }
-
-    log.info("NSP pagination finished: total events={}", all.size());
-    return all;
+    return fetchActiveAlarmEventsCursorPaged();
   }
 
   /**
-   * Old single-call raw fetch (no pagination).
+   * Cursor pagination:
+   * - call #1: base filter sorted desc -> returns up to server page size (1000)
+   * - call #2+: add AND lastTimeDetected < cursor
+   * - repeat until empty or cursor stops decreasing
+   *
+   * Returns list of alarm JSON strings.
    */
-  public String fetchActiveAlarmsRaw() throws Exception {
+  private List<String> fetchActiveAlarmEventsCursorPaged() throws Exception {
+    long cursor = Long.MAX_VALUE;  // exclusive upper bound
+    int page = 0;
+    int total = 0;
+
+    // Keep order of insertion (stable)
+    Map<String, String> dedup = cursorDedupeEnabled ? new LinkedHashMap<>() : null;
+
+    while (true) {
+      page++;
+      if (page > cursorMaxPages) {
+        log.warn("NSP cursor pagination safety stop: reached max-pages={}", cursorMaxPages);
+        break;
+      }
+
+      String raw = fetchActiveAlarmsRaw(cursor == Long.MAX_VALUE ? null : cursor);
+
+      // Parse page data
+      PageData pd = parsePage(raw);
+
+      int count = pd.events().size();
+      if (count == 0) {
+        log.info("NSP cursor pagination finished: empty page at cursor={}", cursor);
+        break;
+      }
+
+      long pageMinCursor = pd.minCursor();
+      log.info("NSP cursor pagination page={} count={} minCursor={} prevCursor={}",
+          page, count, pageMinCursor, cursor);
+
+      if (cursorDedupeEnabled) {
+        for (JsonNode n : pd.events()) {
+          String key = computeDedupeKey(n);
+          String jsonStr = objectMapper.writeValueAsString(n);
+          dedup.putIfAbsent(key, jsonStr);
+        }
+        total = dedup.size();
+      } else {
+        total += count;
+      }
+
+      if (total >= cursorMaxTotal) {
+        log.warn("NSP cursor pagination safety stop: reached max-total={}", cursorMaxTotal);
+        break;
+      }
+
+      // Safety: cursor must move backwards
+      if (pageMinCursor >= cursor) {
+        log.warn("NSP cursor pagination safety stop: cursor did not decrease (prev={}, newMin={})",
+            cursor, pageMinCursor);
+        break;
+      }
+
+      // Next cursor: strictly older than the oldest record we received
+      cursor = pageMinCursor;
+    }
+
+    if (cursorDedupeEnabled) {
+      log.info("NSP cursor pagination finished: pages={} uniqueEvents={}", page, dedup.size());
+      return new ArrayList<>(dedup.values());
+    }
+
+    // fallback shouldn't be reached often
+    return Collections.emptyList();
+  }
+
+  /**
+   * Raw fetch with optional cursor:
+   * - cursor == null: base filter only
+   * - cursor != null: base filter AND lastTimeDetected < cursor
+   *
+   * IMPORTANT:
+   * We intentionally DO NOT pass offset/limit because NSP ignores them.
+   */
+  private String fetchActiveAlarmsRaw(Long cursorExclusive) throws Exception {
     String token = getAccessToken();
 
-    String url = buildAlarmsUrl(null, null);
+    String url = buildAlarmsUrlWithCursor(cursorExclusive);
     log.info("NSP alarms request URL: {}", url);
 
     HttpHeaders headers = new HttpHeaders();
@@ -311,68 +323,147 @@ public class NspClient {
     );
 
     if (!response.getStatusCode().is2xxSuccessful()) {
-      throw new IllegalStateException("NSP alarms request failed: " + response.getStatusCode());
+      throw new IllegalStateException("NSP alarms request failed: " + response.getStatusCode() + " body=" + response.getBody());
     }
 
     return response.getBody();
   }
 
   /**
-   * Paged raw fetch (+ optional sort).
+   * Build alarms URL with alarmFilter and optional cursor condition.
    */
-  public String fetchActiveAlarmsRawPage(int offset, int limit) throws Exception {
-    String token = getAccessToken();
+  private String buildAlarmsUrlWithCursor(Long cursorExclusive) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(baseUrl()).append(alarmsPath);
 
-    String url = buildAlarmsUrl(offset, limit);
-    log.info("NSP alarms page request URL: {}", url);
+    boolean hasQuery = false;
 
-    HttpHeaders headers = new HttpHeaders();
-    headers.setBearerAuth(token);
-    headers.setAccept(List.of(MediaType.valueOf(accept)));
-    headers.setContentType(MediaType.valueOf(contentType));
+    // Combine base filter with cursor filter in ONE alarmFilter expression
+    String effectiveFilter = alarmFilter == null ? "" : alarmFilter.trim();
 
-    HttpEntity<Void> request = new HttpEntity<>(headers);
-    ResponseEntity<String> response = restTemplate.exchange(
-        URI.create(url),
-        HttpMethod.GET,
-        request,
-        String.class
-    );
-
-    if (!response.getStatusCode().is2xxSuccessful()) {
-      throw new IllegalStateException("NSP alarms page request failed: " + response.getStatusCode());
+    if (cursorExclusive != null) {
+      String cursorExpr = cursorField + " < " + cursorExclusive;
+      if (effectiveFilter.isBlank()) {
+        effectiveFilter = cursorExpr;
+      } else {
+        effectiveFilter = "(" + effectiveFilter + ") AND " + cursorExpr;
+      }
     }
 
-    return response.getBody();
+    if (!effectiveFilter.isBlank()) {
+      String encoded = encodeAlarmFilter(effectiveFilter);
+
+      sb.append(hasQuery ? "&" : "?");
+      sb.append("alarmFilter=").append(encoded);
+      hasQuery = true;
+
+      log.info("NSP alarms raw filter : {}", effectiveFilter);
+      log.info("NSP alarms encoded{}  : {}",
+          alarmFilterDoubleEncode ? " x2" : " x1",
+          encoded
+      );
+    }
+
+    // Sort param (optional)
+    appendSortParams(sb, hasQuery);
+
+    return sb.toString();
+  }
+
+  private void appendSortParams(StringBuilder sb, boolean hasQueryAlready) {
+    if (sortParam == null || sortParam.isBlank()) return;
+
+    boolean hasQuery = hasQueryAlready;
+    // docs: use multiple &sort= properties
+    // your endpoint supports: sort=field,asc|desc
+    String[] parts = sortParam.split(";");
+    for (String p : parts) {
+      String s = p.trim();
+      if (s.isEmpty()) continue;
+
+      sb.append(hasQuery ? "&" : "?");
+      sb.append("sort=").append(urlEncodeOnce(s));
+      hasQuery = true;
+    }
   }
 
   /**
-   * Fetch one page and return AlarmPage metadata + alarm events list.
+   * Parse response JSON and return list of alarms + min cursor.
    */
-  public AlarmPage fetchActiveAlarmPage(int offset, int limit) throws Exception {
-    String raw = fetchActiveAlarmsRawPage(offset, limit);
-
+  private PageData parsePage(String raw) throws Exception {
     JsonNode root = objectMapper.readTree(raw);
-    JsonNode resp = root.path("response");
+    JsonNode data = root.at(JsonPointer.compile(alarmsArrayPath));
 
-    int startRow = resp.path("startRow").asInt(offset);
-    int endRow = resp.path("endRow").asInt(offset);
-    int totalRows = resp.path("totalRows").asInt(-1);
-
-    // Detect ignored paging (your exact symptom)
-    if (offset > 0 && startRow == 0) {
-      log.warn("NSP paging may be ignored: requested offset={}, but response startRow={}. " +
-               "Try app.rest.nsp.pagination.mode=START_END for this endpoint/build.",
-          offset, startRow);
+    if (data == null || !data.isArray()) {
+      return new PageData(List.of(), Long.MAX_VALUE);
     }
 
-    List<String> events = splitAlarmEventsFromRaw(raw);
+    List<JsonNode> events = new ArrayList<>();
+    long min = Long.MAX_VALUE;
 
-    return new AlarmPage(startRow, endRow, totalRows, events);
+    for (JsonNode n : data) {
+      events.add(n);
+
+      long c = readCursorValue(n);
+      if (c > 0 && c < min) {
+        min = c;
+      }
+    }
+
+    return new PageData(events, min);
   }
+
+  /**
+   * Read lastTimeDetected (ms epoch). If missing/unparseable, return -1.
+   */
+  private long readCursorValue(JsonNode alarm) {
+    JsonNode node = alarm.get(cursorField);
+    if (node == null || node.isNull()) return -1;
+
+    if (node.isNumber()) {
+      return node.asLong(-1);
+    }
+
+    // Sometimes it can be string; try parse numeric
+    String s = node.asText("");
+    try {
+      return Long.parseLong(s);
+    } catch (Exception e) {
+      return -1;
+    }
+  }
+
+  /**
+   * Dedup key selection (best-effort).
+   * Prefers stable unique IDs if present.
+   */
+  private String computeDedupeKey(JsonNode alarm) {
+    // Common candidates
+    String[] candidates = { "alarmId", "faultId", "id", "ALA_alarmId" };
+
+    for (String c : candidates) {
+      JsonNode v = alarm.get(c);
+      if (v != null && !v.isNull()) {
+        String s = v.asText("").trim();
+        if (!s.isEmpty()) return c + ":" + s;
+      }
+    }
+
+    // Fallback composite key
+    String alarmName = alarm.path("alarmName").asText("");
+    String obj = alarm.path("affectedObjectName").asText("");
+    long t = readCursorValue(alarm);
+
+    return "fallback:" + alarmName + "|" + obj + "|" + t;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Extract alarms into JSON strings (compat)
+  // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Extracts alarms array from raw JSON using alarmsArrayPath.
+   * Returns a list of individual alarm JSON payloads (string).
    */
   private List<String> splitAlarmEventsFromRaw(String raw) throws Exception {
     JsonNode root = objectMapper.readTree(raw);
@@ -405,76 +496,6 @@ public class NspClient {
 
     log.warn("NSP: alarms-array-path {} did not resolve to array; returning single raw payload", alarmsArrayPath);
     return Collections.singletonList(raw);
-  }
-
-  /**
-   * Builds /alarms/details URL with optional:
-   * - alarmFilter
-   * - pagination
-   * - sort (one or more)
-   */
-  private String buildAlarmsUrl(Integer offset, Integer limit) {
-    StringBuilder sb = new StringBuilder();
-    sb.append(baseUrl()).append(alarmsPath);
-
-    boolean hasQuery = false;
-
-    // alarmFilter
-    if (alarmFilter != null && !alarmFilter.isBlank()) {
-      String encoded = encodeAlarmFilter(alarmFilter);
-
-      sb.append(hasQuery ? "&" : "?");
-      sb.append("alarmFilter=").append(encoded);
-      hasQuery = true;
-
-      log.info("NSP alarms raw filter : {}", alarmFilter);
-      log.info("NSP alarms encoded{}  : {}",
-          alarmFilterDoubleEncode ? " x2" : " x1",
-          encoded
-      );
-    }
-
-    // paging params
-    if (offset != null && limit != null) {
-      sb.append(hasQuery ? "&" : "?");
-
-      if (paginationMode == PaginationMode.START_END) {
-        int startRow = offset;
-        int endRow = offset + limit;
-        sb.append("startRow=").append(startRow);
-        sb.append("&endRow=").append(endRow);
-      } else {
-        sb.append("offset=").append(offset);
-        sb.append("&limit=").append(limit);
-      }
-
-      hasQuery = true;
-
-      // sort (optional)
-      appendSortParams(sb);
-    }
-
-    return sb.toString();
-  }
-
-  /**
-   * Appends one or more &sort= parameters.
-   *
-   * Accepts:
-   * - "lastTimeDetected,desc"
-   * - "productType,asc;version,desc"
-   */
-  private void appendSortParams(StringBuilder sb) {
-    if (paginationSort == null || paginationSort.isBlank()) return;
-
-    String[] parts = paginationSort.split(";");
-    for (String p : parts) {
-      String s = p.trim();
-      if (s.isEmpty()) continue;
-
-      String encoded = urlEncodeOnce(s);
-      sb.append("&sort=").append(encoded);
-    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -583,5 +604,5 @@ public class NspClient {
 
   public record SubscriptionInfo(String subscriptionId, String topicId) {}
 
-  public record AlarmPage(int startRow, int endRow, int totalRows, List<String> events) {}
+  private record PageData(List<JsonNode> events, long minCursor) {}
 }

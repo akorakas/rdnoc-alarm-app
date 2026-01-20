@@ -78,12 +78,14 @@ app:
       scheme: https
       host: 172.17.45.132
       alarms-array-path: "/response/data"
-      pagination:
+      cursor-pagination:
         enabled: true
-        limit: 1000
-        mode: START_END
-        max-pages: 1000     # safety guard (optional)
-        sort: "lastTimeDetected,desc"   # optional
+        field: "lastTimeDetected"
+        max-pages: 50
+        max-total: 200000
+        dedupe: true
+
+        sort: "lastTimeDetected,desc"
 
       auth:
         basic: "bnNwcHJveHl1aTpLQGZrYVByb3ghYXRuMDFfbnNwNQ=="
