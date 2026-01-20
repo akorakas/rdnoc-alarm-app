@@ -43,7 +43,7 @@ app:
     enabled: true
     run-on-startup: true
     fixed-delay-ms: 28800000   # 8 hours
-    initial-delay-ms: 60000
+    initial-delay-ms: 28800000
     skip-if-running: true
 
   nsp:
@@ -78,6 +78,8 @@ app:
       scheme: https
       host: 172.17.45.132
       alarms-array-path: "/response/data"
+      alarm-filter: "affectedObjectType <> 'NmsSystem'"
+      alarm-filter-double-encode: true
       cursor-pagination:
         enabled: true
         field: "lastTimeDetected"
@@ -85,7 +87,7 @@ app:
         max-total: 200000
         dedupe: true
 
-        sort: "lastTimeDetected,desc"
+      sort: "lastTimeDetected,desc"
 
       auth:
         basic: "bnNwcHJveHl1aTpLQGZrYVByb3ghYXRuMDFfbnNwNQ=="
@@ -99,9 +101,6 @@ app:
         token: "/rest-gateway/rest/api/v1/auth/token"
         alarms: "/FaultManagement/rest/api/v2/alarms/details/"
         subscriptions: "/nbi-notification/api/v1/notifications/subscriptions"
-
-      alarm-filter: "(alarmName LIKE 'NetworkInterfaceDown') OR NOT (affectedObjectType LIKE '%NmsSystem%')"
-      alarm-filter-double-encode: true
 
       subscription:
         category-name: "NSP-FAULT"
