@@ -66,9 +66,18 @@ public class NspClient {
   @Value("${app.rest.nsp.alarms-array-path:/response/data}")
   private String alarmsArrayPath;
 
-  // Raw alarm filter
+  // Raw alarm filter (read from YAML)
   @Value("${app.rest.nsp.alarm-filter:}")
   private String alarmFilter;
+
+  /**
+   * ✅ NSP often expects DOUBLE-URL-encoding in alarmFilter:
+   * Example: severity%253D'major'
+   *
+   * Keep this true unless your NSP version definitely requires single encoding.
+   */
+  @Value("${app.rest.nsp.alarm-filter-double-encode:true}")
+  private boolean alarmFilterDoubleEncode;
 
   // Subscription request payload parts
   @Value("${app.rest.nsp.subscription.category-name:NSP-FAULT}")
@@ -81,7 +90,7 @@ public class NspClient {
   private String subscriptionPropertyFilter;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Pagination (NEW)
+  // Pagination
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
@@ -123,6 +132,26 @@ public class NspClient {
 
   private String baseUrl() {
     return scheme + "://" + host;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Encoding helpers
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private static String urlEncodeOnce(String s) {
+    return URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
+  }
+
+  private static String urlEncodeTwice(String s) {
+    String once = urlEncodeOnce(s);
+    return urlEncodeOnce(once);
+  }
+
+  private String encodeAlarmFilter(String rawFilter) {
+    if (rawFilter == null || rawFilter.isBlank()) {
+      return "";
+    }
+    return alarmFilterDoubleEncode ? urlEncodeTwice(rawFilter) : urlEncodeOnce(rawFilter);
   }
 
   /**
@@ -239,7 +268,7 @@ public class NspClient {
     String token = getAccessToken();
 
     String url = buildAlarmsUrl(null, null);
-    log.info("NSP alarms request URL  : {}", url);
+    log.info("NSP alarms request URL: {}", url);
 
     HttpHeaders headers = new HttpHeaders();
     headers.setBearerAuth(token);
@@ -263,7 +292,6 @@ public class NspClient {
     String token = getAccessToken();
 
     String url = buildAlarmsUrl(offset, limit);
-
     log.info("NSP alarms page request URL: {}", url);
 
     HttpHeaders headers = new HttpHeaders();
@@ -282,7 +310,7 @@ public class NspClient {
   }
 
   /**
-   * ✅ NEW: fetch one page and return AlarmPage metadata + alarm events list.
+   * ✅ Fetch one page and return AlarmPage metadata + alarm events list.
    * Uses NSP pagination object:
    *   response.startRow
    *   response.endRow
@@ -291,25 +319,17 @@ public class NspClient {
    */
   public AlarmPage fetchActiveAlarmPage(int offset, int limit) throws Exception {
     String raw = fetchActiveAlarmsRawPage(offset, limit);
-    JsonNode root = objectMapper.readTree(raw);
 
+    JsonNode root = objectMapper.readTree(raw);
     JsonNode resp = root.path("response");
+
     int startRow = resp.path("startRow").asInt(offset);
     int endRow = resp.path("endRow").asInt(offset);
     int totalRows = resp.path("totalRows").asInt(-1);
 
-    // Extract alarm objects from /response/data
     List<String> events = splitAlarmEventsFromRaw(raw);
 
     return new AlarmPage(startRow, endRow, totalRows, events);
-  }
-
-  /**
-   * NEW: fetch one page and return list of alarm JSON objects.
-   */
-  public List<String> fetchActiveAlarmEventsPage(int offset, int limit) throws Exception {
-    AlarmPage page = fetchActiveAlarmPage(offset, limit);
-    return page.events();
   }
 
   /**
@@ -364,13 +384,17 @@ public class NspClient {
 
     // alarmFilter
     if (alarmFilter != null && !alarmFilter.isBlank()) {
-      String onceEncoded = URLEncoder.encode(alarmFilter, StandardCharsets.UTF_8).replace("+", "%20");
+      String encoded = encodeAlarmFilter(alarmFilter);
+
       sb.append(hasQuery ? "&" : "?");
-      sb.append("alarmFilter=").append(onceEncoded);
+      sb.append("alarmFilter=").append(encoded);
       hasQuery = true;
 
-      log.info("NSP alarms raw filter   : {}", alarmFilter);
-      log.info("NSP alarms encoded      : {}", onceEncoded);
+      log.info("NSP alarms raw filter : {}", alarmFilter);
+      log.info("NSP alarms encoded{}  : {}",
+          alarmFilterDoubleEncode ? " x2" : " x1",
+          encoded
+      );
     }
 
     // offset/limit
@@ -402,7 +426,7 @@ public class NspClient {
       String s = p.trim();
       if (s.isEmpty()) continue;
 
-      String encoded = URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20");
+      String encoded = urlEncodeOnce(s);
       sb.append("&sort=").append(encoded);
     }
   }
@@ -426,7 +450,7 @@ public class NspClient {
     headers.setContentType(MediaType.APPLICATION_JSON);
     headers.setAccept(List.of(MediaType.valueOf(accept)));
 
-    // Build JSON string safely
+    // Build JSON string safely:
     // advancedFilter must be a JSON string inside JSON => must be quoted/escaped.
     String bodyJson = """
       {
@@ -458,7 +482,9 @@ public class NspClient {
     String topicId = root.at("/response/data/topicId").asText(null);
 
     if (subscriptionId == null || subscriptionId.isBlank() || topicId == null || topicId.isBlank()) {
-      throw new IllegalStateException("Could not extract subscriptionId/topicId from create response: " + response.getBody());
+      throw new IllegalStateException(
+          "Could not extract subscriptionId/topicId from create response: " + response.getBody()
+      );
     }
 
     log.info("NSP subscription created: subscriptionId={}, topicId={}", subscriptionId, topicId);
@@ -495,6 +521,10 @@ public class NspClient {
 
     log.info("NSP subscription renewed: subscriptionId={}", subscriptionId);
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // DTOs
+  // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Minimal DTO for createSubscription response.

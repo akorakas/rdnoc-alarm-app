@@ -97,7 +97,7 @@ app:
         alarms: "/FaultManagement/rest/api/v2/alarms/details/"
         subscriptions: "/nbi-notification/api/v1/notifications/subscriptions"
 
-      alarm-filter: "affectedObjectType like '%Equipment%'"
+      alarm-filter: "affectedObjectType NOT LIKE 'NmsSystem'"
 
       subscription:
         category-name: "NSP-FAULT"
