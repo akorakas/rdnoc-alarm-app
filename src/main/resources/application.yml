@@ -81,6 +81,7 @@ app:
       pagination:
         enabled: true
         limit: 1000
+        mode: START_END
         max-pages: 1000     # safety guard (optional)
         sort: "lastTimeDetected,desc"   # optional
 
@@ -97,7 +98,8 @@ app:
         alarms: "/FaultManagement/rest/api/v2/alarms/details/"
         subscriptions: "/nbi-notification/api/v1/notifications/subscriptions"
 
-      alarm-filter: "affectedObjectType NOT LIKE 'NmsSystem'"
+      alarm-filter: "(alarmName LIKE 'NetworkInterfaceDown') OR NOT (affectedObjectType LIKE '%NmsSystem%')"
+      alarm-filter-double-encode: true
 
       subscription:
         category-name: "NSP-FAULT"

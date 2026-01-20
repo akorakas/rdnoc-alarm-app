@@ -1,6 +1,7 @@
 // src/main/java/com/example/kafka/nsp/NspClient.java
 package com.example.kafka.nsp;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -71,10 +72,11 @@ public class NspClient {
   private String alarmFilter;
 
   /**
-   * ✅ NSP often expects DOUBLE-URL-encoding in alarmFilter:
+   * NSP sometimes expects DOUBLE-URL-encoding in alarmFilter:
    * Example: severity%253D'major'
    *
-   * Keep this true unless your NSP version definitely requires single encoding.
+   * In your environment, you verified X1 encoding works, so set:
+   *   app.rest.nsp.alarm-filter-double-encode=false
    */
   @Value("${app.rest.nsp.alarm-filter-double-encode:true}")
   private boolean alarmFilterDoubleEncode;
@@ -125,6 +127,29 @@ public class NspClient {
   @Value("${app.rest.nsp.pagination.sort:lastTimeDetected,desc}")
   private String paginationSort;
 
+  /**
+   * Pagination mode:
+   *
+   * OFFSET_LIMIT:
+   *   ?offset=0&limit=1000
+   *
+   * START_END:
+   *   ?startRow=0&endRow=1000
+   *
+   * IMPORTANT:
+   * Your logs showed NSP ignores offset (returns startRow=0 again),
+   * so use START_END mode for this endpoint/build:
+   *
+   * app.rest.nsp.pagination.mode=START_END
+   */
+  public enum PaginationMode {
+    OFFSET_LIMIT,
+    START_END
+  }
+
+  @Value("${app.rest.nsp.pagination.mode:OFFSET_LIMIT}")
+  private PaginationMode paginationMode;
+
   // ───────────────────────────────────────
 
   private String cachedToken;
@@ -172,7 +197,12 @@ public class NspClient {
     Map<String, String> body = Map.of("grant_type", grantType);
     HttpEntity<Map<String, String>> request = new HttpEntity<>(body, headers);
 
-    ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
+    ResponseEntity<String> response = restTemplate.exchange(
+        URI.create(url),
+        HttpMethod.POST,
+        request,
+        String.class
+    );
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException("NSP token request failed: " + response.getStatusCode());
@@ -198,17 +228,15 @@ public class NspClient {
 
   /**
    * Backwards-compatible method:
-   * - If pagination is enabled -> loops through pages using offset/limit
+   * - If pagination is enabled -> loops through pages using offset/limit (or startRow/endRow)
    * - Else -> performs single call (old behavior)
    */
   public List<String> fetchActiveAlarmEvents() throws Exception {
     if (!paginationEnabled) {
-      // old behavior (single call)
       String raw = fetchActiveAlarmsRaw();
       return splitAlarmEventsFromRaw(raw);
     }
 
-    // new behavior: offset/limit loop using NSP startRow/endRow/totalRows
     final int limit = Math.max(1, paginationLimit);
 
     int offset = 0;
@@ -229,7 +257,6 @@ public class NspClient {
       log.info("NSP pagination page meta: startRow={}, endRow={}, totalRows={}, count={}",
           alarmPage.startRow(), alarmPage.endRow(), alarmPage.totalRows(), alarmPage.events().size());
 
-      // stop if empty
       if (alarmPage.events().isEmpty()) {
         log.info("NSP pagination finished: empty page at offset={}, limit={}", offset, limit);
         break;
@@ -237,14 +264,14 @@ public class NspClient {
 
       all.addAll(alarmPage.events());
 
-      // ✅ Correct stop rule: NSP tells us totalRows + endRow
+      // Stop if we reached end
       if (alarmPage.totalRows() >= 0 && alarmPage.endRow() >= alarmPage.totalRows()) {
         log.info("NSP pagination finished: endRow >= totalRows ({} >= {})",
             alarmPage.endRow(), alarmPage.totalRows());
         break;
       }
 
-      // ✅ Extra safety: ensure forward progress
+      // Safety: ensure forward progress
       if (alarmPage.endRow() <= lastEndRow) {
         log.warn("NSP pagination safety stop: endRow did not increase (prevEndRow={}, endRow={}). offset={}",
             lastEndRow, alarmPage.endRow(), offset);
@@ -253,7 +280,7 @@ public class NspClient {
 
       lastEndRow = alarmPage.endRow();
 
-      // ✅ Next offset MUST be endRow (not offset+limit)
+      // Next offset must be endRow
       offset = alarmPage.endRow();
     }
 
@@ -262,7 +289,7 @@ public class NspClient {
   }
 
   /**
-   * Old single-call raw fetch (no offset/limit).
+   * Old single-call raw fetch (no pagination).
    */
   public String fetchActiveAlarmsRaw() throws Exception {
     String token = getAccessToken();
@@ -276,7 +303,12 @@ public class NspClient {
     headers.setContentType(MediaType.valueOf(contentType));
 
     HttpEntity<Void> request = new HttpEntity<>(headers);
-    ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
+    ResponseEntity<String> response = restTemplate.exchange(
+        URI.create(url),
+        HttpMethod.GET,
+        request,
+        String.class
+    );
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException("NSP alarms request failed: " + response.getStatusCode());
@@ -286,7 +318,7 @@ public class NspClient {
   }
 
   /**
-   * NEW: paged raw fetch (offset/limit + optional sort).
+   * Paged raw fetch (+ optional sort).
    */
   public String fetchActiveAlarmsRawPage(int offset, int limit) throws Exception {
     String token = getAccessToken();
@@ -300,7 +332,12 @@ public class NspClient {
     headers.setContentType(MediaType.valueOf(contentType));
 
     HttpEntity<Void> request = new HttpEntity<>(headers);
-    ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
+    ResponseEntity<String> response = restTemplate.exchange(
+        URI.create(url),
+        HttpMethod.GET,
+        request,
+        String.class
+    );
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException("NSP alarms page request failed: " + response.getStatusCode());
@@ -310,12 +347,7 @@ public class NspClient {
   }
 
   /**
-   * ✅ Fetch one page and return AlarmPage metadata + alarm events list.
-   * Uses NSP pagination object:
-   *   response.startRow
-   *   response.endRow
-   *   response.totalRows
-   *   response.data[]
+   * Fetch one page and return AlarmPage metadata + alarm events list.
    */
   public AlarmPage fetchActiveAlarmPage(int offset, int limit) throws Exception {
     String raw = fetchActiveAlarmsRawPage(offset, limit);
@@ -327,6 +359,13 @@ public class NspClient {
     int endRow = resp.path("endRow").asInt(offset);
     int totalRows = resp.path("totalRows").asInt(-1);
 
+    // Detect ignored paging (your exact symptom)
+    if (offset > 0 && startRow == 0) {
+      log.warn("NSP paging may be ignored: requested offset={}, but response startRow={}. " +
+               "Try app.rest.nsp.pagination.mode=START_END for this endpoint/build.",
+          offset, startRow);
+    }
+
     List<String> events = splitAlarmEventsFromRaw(raw);
 
     return new AlarmPage(startRow, endRow, totalRows, events);
@@ -334,7 +373,6 @@ public class NspClient {
 
   /**
    * Extracts alarms array from raw JSON using alarmsArrayPath.
-   * If not found, falls back to root array or returns single raw payload.
    */
   private List<String> splitAlarmEventsFromRaw(String raw) throws Exception {
     JsonNode root = objectMapper.readTree(raw);
@@ -372,8 +410,7 @@ public class NspClient {
   /**
    * Builds /alarms/details URL with optional:
    * - alarmFilter
-   * - offset
-   * - limit
+   * - pagination
    * - sort (one or more)
    */
   private String buildAlarmsUrl(Integer offset, Integer limit) {
@@ -397,11 +434,20 @@ public class NspClient {
       );
     }
 
-    // offset/limit
+    // paging params
     if (offset != null && limit != null) {
       sb.append(hasQuery ? "&" : "?");
-      sb.append("offset=").append(offset);
-      sb.append("&limit=").append(limit);
+
+      if (paginationMode == PaginationMode.START_END) {
+        int startRow = offset;
+        int endRow = offset + limit;
+        sb.append("startRow=").append(startRow);
+        sb.append("&endRow=").append(endRow);
+      } else {
+        sb.append("offset=").append(offset);
+        sb.append("&limit=").append(limit);
+      }
+
       hasQuery = true;
 
       // sort (optional)
@@ -450,8 +496,7 @@ public class NspClient {
     headers.setContentType(MediaType.APPLICATION_JSON);
     headers.setAccept(List.of(MediaType.valueOf(accept)));
 
-    // Build JSON string safely:
-    // advancedFilter must be a JSON string inside JSON => must be quoted/escaped.
+    // advancedFilter must be a JSON string inside JSON => must be quoted/escaped
     String bodyJson = """
       {
         "categories": [
@@ -469,7 +514,12 @@ public class NspClient {
       );
 
     HttpEntity<String> request = new HttpEntity<>(bodyJson, headers);
-    ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
+    ResponseEntity<String> response = restTemplate.exchange(
+        URI.create(url),
+        HttpMethod.POST,
+        request,
+        String.class
+    );
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException(
@@ -511,7 +561,12 @@ public class NspClient {
     headers.setAccept(List.of(MediaType.valueOf(accept)));
 
     HttpEntity<String> request = new HttpEntity<>("", headers);
-    ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
+    ResponseEntity<String> response = restTemplate.exchange(
+        URI.create(url),
+        HttpMethod.POST,
+        request,
+        String.class
+    );
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException(
@@ -526,13 +581,7 @@ public class NspClient {
   // DTOs
   // ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Minimal DTO for createSubscription response.
-   */
   public record SubscriptionInfo(String subscriptionId, String topicId) {}
 
-  /**
-   * Page object for NSP pagination.
-   */
   public record AlarmPage(int startRow, int endRow, int totalRows, List<String> events) {}
 }
