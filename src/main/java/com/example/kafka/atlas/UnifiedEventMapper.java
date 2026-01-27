@@ -116,15 +116,13 @@ public class UnifiedEventMapper {
   // ---------------- helpers ----------------
 
   private static Instant parseEventTime(String eventTime, Long tsMs) {
+    if (tsMs != null && tsMs > 0) {
+      return Instant.ofEpochMilli(tsMs);
+    }
     if (eventTime != null && !eventTime.isBlank()) {
       try {
         return Instant.parse(eventTime);
-      } catch (Exception ignore) {
-        // fall through to tsMs/now
-      }
-    }
-    if (tsMs != null && tsMs > 0) {
-      return Instant.ofEpochMilli(tsMs);
+      } catch (Exception ignore) {}
     }
     return Instant.now();
   }
