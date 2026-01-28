@@ -306,6 +306,13 @@ transform:
           - set: timestampSec
             expr: "timestamp != null ? (timestamp / 1000) : null"
 
+      - type: update
+        compute:
+          - set: sourceEms
+            expr: "'NSP_ATNOI'"
+          - set: emsVendorID
+            expr: "'NSP'"
+
       - type: neNameEnrich
 
       # NEW: Build UnifiedEvent (writes final JSON to ctx.rendered / "$")
@@ -371,6 +378,7 @@ transform:
             expr: "null"
           - set: alarmCreate
             expr: "null"
+
 
       - type: neNameEnrich
 

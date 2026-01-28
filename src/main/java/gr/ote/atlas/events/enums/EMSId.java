@@ -31,5 +31,6 @@ public enum EMSId {
     IVR,
     MV36_MOBILE,
     IVR_PERIPHERALS,
-    NSP_ATNOI
+    NSP_ATNOI,
+    EXAGRID
 }
