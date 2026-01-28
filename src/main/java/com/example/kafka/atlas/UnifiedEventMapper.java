@@ -74,7 +74,7 @@ public class UnifiedEventMapper {
 
       // type/severity come from YAML if present, otherwise from fields
       ue.setType(mapEventType(firstNonBlank(typeStr, "EVENT")));
-      ue.setSeverity(mapSeverity(firstNonBlank(sevStr, egSev)));
+      ue.setSeverity(Severity.UNKNOWN);
 
       // timestamp: prefer egEventParamsCreateTimeRaw, else ctx.timestamp, else eventTime
       Long egTsMs = toEpochMillis(egCreateMs);
@@ -165,7 +165,14 @@ public class UnifiedEventMapper {
 
   private static EventType mapEventType(String type) {
     if (type == null) return EventType.FAULT;
-    return switch (type.toUpperCase()) {
+  
+    String t = type.trim();
+  
+    if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith("\"") && t.endsWith("\""))) {
+      t = t.substring(1, t.length() - 1).trim();
+    }
+  
+    return switch (t.toUpperCase()) {
       case "EVENT" -> EventType.EVENT;
       case "CLEAR" -> EventType.CLEAR;
       case "CHANGE" -> EventType.CHANGE;
@@ -179,7 +186,8 @@ public class UnifiedEventMapper {
 
   private static Severity mapSeverity(String sev) {
     if (sev == null) return Severity.UNKNOWN;
-    return switch (sev.toLowerCase()) {
+    String s = sev.trim().toLowerCase();
+    return switch (s) {
       case "critical" -> Severity.CRITICAL;
       case "major" -> Severity.MAJOR;
       case "minor" -> Severity.MINOR;
