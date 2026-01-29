@@ -63,6 +63,8 @@ public class UnifiedEventMapper {
       String egDevName  = getText(fields, "egEventParamsDeviceName");
       String egSev      = getText(fields, "egEventParamsSeverity");
       String egCreateMs = getText(fields, "egEventParamsCreateTimeRaw"); // millis as string
+      String egText     = getText(fields, "egEventParamsText");
+      String egDetail   = getText(fields, "egEventParamsDetail");
 
       // required UE fields per your spec
       ue.setEmsDomain(EMSDomain.UNKNOWN);
@@ -72,8 +74,14 @@ public class UnifiedEventMapper {
       ue.setNeEquipment("");            // explicitly blank
       ue.setAlarmIdentifier(null);      // explicitly null for now
 
-      // type/severity come from YAML if present, otherwise from fields
-      ue.setType(mapEventType(firstNonBlank(typeStr, "EVENT")));
+      // TYPE:
+      // - if YAML explicitly set type -> respect it
+      // - else compute from ExaGrid severity (+ clear keywords)
+      String computedType = computeExagridType(typeStr, egSev, egText, egDetail);
+      ue.setType(mapEventType(computedType));
+
+      // SEVERITY:
+      // per your latest requirement: always UNKNOWN for ExaGrid output
       ue.setSeverity(Severity.UNKNOWN);
 
       // timestamp: prefer egEventParamsCreateTimeRaw, else ctx.timestamp, else eventTime
@@ -163,15 +171,52 @@ public class UnifiedEventMapper {
     return Instant.now();
   }
 
+  /**
+   * ExaGrid type rules:
+   * - If YAML already set type -> keep it (after sanitizing)
+   * - Else:
+   *   - severity in {Error,Critical,Major,Minor,Warning} => FAULT (or CLEAR if "clear" keywords)
+   *   - otherwise => EVENT
+   */
+  private static String computeExagridType(String typeStr, String egSev, String text, String detail) {
+
+    // If YAML explicitly sets type, respect it
+    String yamlType = normalizeSimple(typeStr);
+    if (yamlType != null) return yamlType;
+
+    String sev = normalizeSimple(egSev);
+    String sevLower = (sev == null) ? "" : sev.toLowerCase();
+
+    String all = (text == null ? "" : text) + " " + (detail == null ? "" : detail);
+    String allLower = all.toLowerCase();
+
+    boolean isClear =
+        allLower.contains("clear") ||
+        allLower.contains("cleared") ||
+        allLower.contains("resolved") ||
+        allLower.contains("recovered") ||
+        allLower.contains("recovery");
+
+    boolean isFaultLike =
+        sevLower.equals("error") ||
+        sevLower.equals("critical") ||
+        sevLower.equals("major") ||
+        sevLower.equals("minor") ||
+        sevLower.equals("warning");
+
+    if (isFaultLike) return isClear ? "CLEAR" : "FAULT";
+    return "EVENT";
+  }
+
   private static EventType mapEventType(String type) {
     if (type == null) return EventType.FAULT;
-  
+
     String t = type.trim();
-  
+
     if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith("\"") && t.endsWith("\""))) {
       t = t.substring(1, t.length() - 1).trim();
     }
-  
+
     return switch (t.toUpperCase()) {
       case "EVENT" -> EventType.EVENT;
       case "CLEAR" -> EventType.CLEAR;
@@ -195,9 +240,9 @@ public class UnifiedEventMapper {
       case "cleared" -> Severity.CLEARED;
       case "indeterminate" -> Severity.INDETERMINATE;
 
-      // ExaGrid strings
-      case "info" -> Severity.UNKNOWN;   // change later if you add INFO to enum
-      case "error" -> Severity.MAJOR;    // or map to CRITICAL if you prefer
+      // ExaGrid strings (kept for NSP fallback usage if ever used)
+      case "info" -> Severity.UNKNOWN;
+      case "error" -> Severity.MAJOR;
       default -> Severity.UNKNOWN;
     };
   }
@@ -279,9 +324,27 @@ public class UnifiedEventMapper {
     return (v == null || v.isNull()) ? null : v.asLong();
   }
 
+  /**
+   * Normalize text coming from YAML / ctx:
+   * - trim
+   * - strip surrounding quotes '...' or "..."
+   * - return null if empty
+   */
+  private static String normalizeSimple(String s) {
+    if (s == null) return null;
+    String t = s.trim();
+    if (t.isEmpty()) return null;
+
+    if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith("\"") && t.endsWith("\""))) {
+      t = t.substring(1, t.length() - 1).trim();
+    }
+    return t.isEmpty() ? null : t;
+  }
+
   private static <E extends Enum<E>> E parseEnumOrDefault(Class<E> enumClass, String raw, E fallback) {
-    if (raw == null || raw.isBlank()) return fallback;
-    try { return Enum.valueOf(enumClass, raw.trim()); }
+    String t = normalizeSimple(raw);
+    if (t == null) return fallback;
+    try { return Enum.valueOf(enumClass, t); }
     catch (Exception ignore) { return fallback; }
   }
 }
