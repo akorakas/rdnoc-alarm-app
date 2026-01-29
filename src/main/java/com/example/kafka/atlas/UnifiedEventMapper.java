@@ -2,7 +2,6 @@ package com.example.kafka.atlas;
 
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.Locale;
 import java.util.Map;
 
 import com.example.kafka.service.pipeline.TransformContext;
@@ -24,16 +23,12 @@ public class UnifiedEventMapper {
 
     JsonNode sourceEventNode = ctx.get("sourceEvent");
 
-    // NSP subscription only (ISO). Telegraf/ExaGrid usually won't have it.
-    String eventTime = clean(ctx.get("eventTime"));
+    String eventTime = ctx.get("eventTime"); // NSP subscription only (ISO)
+    Object tsObj     = ctx.get("timestamp"); // can be ms/sec/decimal-sec depending on flow
+    Long tsMs        = toEpochMillis(tsObj);
 
-    // can be ms/sec/decimal-sec depending on flow
-    Object tsObj = ctx.get("timestamp");
-    Long tsMs = toEpochMillis(tsObj);
-
-    // YAML computed fields (used for NON-ExaGrid flows)
-    String typeStr = clean(ctx.get("type"));       // EVENT/FAULT/CLEAR...
-    String sevStr  = clean(ctx.get("severity"));   // optional
+    String typeStr   = clean(ctx.get("type"));      // YAML computed: EVENT/FAULT/CLEAR...
+    String sevStr    = clean(ctx.get("severity"));  // YAML computed (optional)
 
     String emsDomainRaw = clean(ctx.get("emsDomain"));
     String neId = clean(ctx.get("neId"));
@@ -57,7 +52,7 @@ public class UnifiedEventMapper {
     ue.setEmsVendorID(vendor);
 
     // ------------------------------------------------------------------
-    // ExaGrid / Telegraf mapping
+    // ExaGrid / Telegraf mapping (from fields.egEventParams*)
     // ------------------------------------------------------------------
     if (sourceEms == EMSId.EXAGRID && looksLikeTelegraf(sourceEventNode)) {
 
@@ -77,29 +72,20 @@ public class UnifiedEventMapper {
       ue.setNeEquipment("");            // explicitly blank
       ue.setAlarmIdentifier(null);      // explicitly null for now
 
-      // IMPORTANT:
-      // - Keep YAML in your pipeline for other systems
-      // - For ExaGrid, do NOT trust YAML "type" because you want:
-      //     if egEventParamsSeverity == "Error" => FAULT
-      //     else                                => EVENT
-      //
-      // This is robust against hidden unicode whitespace (NBSP, etc.)
-      String exaTypeStr = classifyExaGridType(egSev);
+      // ✅ Robust ExaGrid type decision (do NOT trust YAML for this)
+      String exaType = classifyExaGridType(egSev);
 
-      // Optional sanity print (keep while debugging; remove later)
       System.out.println(
-        "EXAGRID sanity: egSev=[" + egSev + "] cp=[" + dumpCodepoints(egSev) + "] " +
-        "norm=[" + normalizeExaSeverity(egSev) + "] => exaType=[" + exaTypeStr + "] " +
-        "ctx.type=[" + typeStr + "] ctx.sev=[" + sevStr + "]"
+        "EXAGRID sanity: egSev=[" + egSev + "] normalized=[" + normalize(egSev) + "]"
+        + " => exaType=[" + exaType + "] ctx.type=[" + typeStr + "] ctx.sev=[" + sevStr + "]"
       );
 
-      ue.setType(mapEventType(exaTypeStr));
+      ue.setType(mapEventType(exaType));
 
-      // You currently want severity always UNKNOWN for ExaGrid output
-      // (If later you decide to map Error->MAJOR etc, change here)
+      // You want severity always UNKNOWN for ExaGrid output
       ue.setSeverity(Severity.UNKNOWN);
 
-      // timestamp: prefer ExaGrid raw ms, else ctx.timestamp, else eventTime
+      // timestamp: prefer egEventParamsCreateTimeRaw, else ctx.timestamp, else eventTime
       Long egTsMs = toEpochMillis(egCreateMs);
       ue.setTimestamp(parseEventTime(firstNonNull(egTsMs, tsMs), eventTime));
 
@@ -111,53 +97,52 @@ public class UnifiedEventMapper {
       t.setTimestamp(toEpochSecondsLong(sourceEventNode.get("timestamp")));
       ue.setSourceEvent(t);
 
-      return ue;
+    } else {
+
+      // ------------------------------------------------------------------
+      // NSP mapping (existing behaviour preserved)
+      // ------------------------------------------------------------------
+      ue.setEmsDomain(mapDomain(firstNonBlank(emsDomainRaw, getText(sourceEventNode, "sourceType"))));
+      ue.setType(mapEventType(typeStr));
+      ue.setSeverity(mapSeverity(firstNonBlank(sevStr, getText(sourceEventNode, "severity"))));
+      ue.setTimestamp(parseEventTime(tsMs, eventTime));
+
+      ue.setSerialNo(firstNonBlank(serialNo, getText(sourceEventNode, "objectId")));
+      ue.setFaultId(firstNonBlank(faultId, getText(sourceEventNode, "alarmName")));
+      ue.setNeName(firstNonBlank(neName, getText(sourceEventNode, "neName")));
+
+      String neEquip = (affectedObjectName != null ? affectedObjectName : "");
+      ue.setNeEquipment(neEquip);
+
+      ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId, serialNo));
+
+      NokiaAtnoiAlarm n = new NokiaAtnoiAlarm();
+      n.setOriginalSeverity(getText(sourceEventNode, "originalSeverity"));
+      n.setNeId(getText(sourceEventNode, "neId"));
+      n.setNeName(getText(sourceEventNode, "neName"));
+      n.setAlarmName(getText(sourceEventNode, "alarmName"));
+      n.setAffectedObjectName(getText(sourceEventNode, "affectedObjectName"));
+      n.setAffectedObject(getText(sourceEventNode, "affectedObject"));
+      n.setAlarmType(getText(sourceEventNode, "alarmType"));
+      n.setProbableCause(getText(sourceEventNode, "probableCause"));
+      n.setFirstTimeDetected(getLong(sourceEventNode, "firstTimeDetected"));
+      n.setLastTimeDetected(getLong(sourceEventNode, "lastTimeDetected"));
+      n.setAdminState(getText(sourceEventNode, "adminState"));
+      n.setSourceType(getText(sourceEventNode, "sourceType"));
+      n.setObjectId(getText(sourceEventNode, "objectId"));
+      n.setObjectFullName(getText(sourceEventNode, "objectFullName"));
+      n.setAdditionalText(getText(sourceEventNode, "additionalText"));
+      n.setSourceSystem(getText(sourceEventNode, "sourceSystem"));
+
+      // delete fallbacks
+      if (n.getObjectId() == null) n.setObjectId(serialNo);
+      if (n.getObjectFullName() == null) n.setObjectFullName(objectFullName);
+      if (n.getAlarmName() == null) n.setAlarmName(faultId);
+      if (n.getNeId() == null) n.setNeId(neId);
+      if (n.getNeName() == null) n.setNeName(neName);
+
+      ue.setSourceEvent(n);
     }
-
-    // ------------------------------------------------------------------
-    // NSP (and any other non-ExaGrid system) mapping
-    // - This keeps relying on YAML-computed "type"/"severity" if present.
-    // ------------------------------------------------------------------
-    ue.setEmsDomain(mapDomain(firstNonBlank(emsDomainRaw, getText(sourceEventNode, "sourceType"))));
-    ue.setType(mapEventType(typeStr));
-    ue.setSeverity(mapSeverity(firstNonBlank(sevStr, getText(sourceEventNode, "severity"))));
-    ue.setTimestamp(parseEventTime(tsMs, eventTime));
-
-    ue.setSerialNo(firstNonBlank(serialNo, getText(sourceEventNode, "objectId")));
-    ue.setFaultId(firstNonBlank(faultId, getText(sourceEventNode, "alarmName")));
-    ue.setNeName(firstNonBlank(neName, getText(sourceEventNode, "neName")));
-
-    String neEquip = (affectedObjectName != null ? affectedObjectName : "");
-    ue.setNeEquipment(neEquip);
-
-    ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId, serialNo));
-
-    NokiaAtnoiAlarm n = new NokiaAtnoiAlarm();
-    n.setOriginalSeverity(getText(sourceEventNode, "originalSeverity"));
-    n.setNeId(getText(sourceEventNode, "neId"));
-    n.setNeName(getText(sourceEventNode, "neName"));
-    n.setAlarmName(getText(sourceEventNode, "alarmName"));
-    n.setAffectedObjectName(getText(sourceEventNode, "affectedObjectName"));
-    n.setAffectedObject(getText(sourceEventNode, "affectedObject"));
-    n.setAlarmType(getText(sourceEventNode, "alarmType"));
-    n.setProbableCause(getText(sourceEventNode, "probableCause"));
-    n.setFirstTimeDetected(getLong(sourceEventNode, "firstTimeDetected"));
-    n.setLastTimeDetected(getLong(sourceEventNode, "lastTimeDetected"));
-    n.setAdminState(getText(sourceEventNode, "adminState"));
-    n.setSourceType(getText(sourceEventNode, "sourceType"));
-    n.setObjectId(getText(sourceEventNode, "objectId"));
-    n.setObjectFullName(getText(sourceEventNode, "objectFullName"));
-    n.setAdditionalText(getText(sourceEventNode, "additionalText"));
-    n.setSourceSystem(getText(sourceEventNode, "sourceSystem"));
-
-    // delete fallbacks
-    if (n.getObjectId() == null) n.setObjectId(serialNo);
-    if (n.getObjectFullName() == null) n.setObjectFullName(objectFullName);
-    if (n.getAlarmName() == null) n.setAlarmName(faultId);
-    if (n.getNeId() == null) n.setNeId(neId);
-    if (n.getNeName() == null) n.setNeName(neName);
-
-    ue.setSourceEvent(n);
 
     // enrichment
     Object edObj = ctx.get("enrichedData");
@@ -178,52 +163,22 @@ public class UnifiedEventMapper {
 
   // ---------------- ExaGrid helpers ----------------
 
-  /**
-   * Exact requirement:
-   * - if fields.egEventParamsSeverity == "Error" -> FAULT
-   * - else -> EVENT
-   *
-   * Robust against hidden whitespace (NBSP, etc).
-   */
   private static String classifyExaGridType(String egSeverityRaw) {
-    String s = normalizeExaSeverity(egSeverityRaw);
-    // handle "error", "error " (NBSP), "error\r", etc.
-    if (s.startsWith("error")) return "FAULT";
+    String s = normalize(egSeverityRaw);
+
+    // your exact requirement:
+    // Error => FAULT, Info/Audit/etc => EVENT
+    if ("error".equals(s)) return "FAULT";
+
+    // If you later want these to be FAULT too, uncomment:
+    // if ("critical".equals(s) || "major".equals(s) || "minor".equals(s) || "warning".equals(s)) return "FAULT";
+
     return "EVENT";
   }
 
-  /**
-   * Strong normalization because Java trim() doesn't remove NBSP and some unicode spaces.
-   */
-  private static String normalizeExaSeverity(String v) {
+  private static String normalize(String v) {
     if (v == null) return "";
-    String s = v;
-
-    // Remove quotes
-    s = s.replace("\"", "").replace("'", "");
-
-    // Normalize common “invisible” whitespace to normal spaces
-    s = s.replace('\u00A0', ' '); // NBSP
-    s = s.replace('\u2007', ' '); // figure space
-    s = s.replace('\u202F', ' '); // narrow NBSP
-
-    // Remove control chars (includes \r \n \t)
-    s = s.replaceAll("[\\p{Cntrl}]", "");
-
-    // Collapse whitespace and trim
-    s = s.trim().replaceAll("\\s+", " ");
-
-    return s.toLowerCase(Locale.ROOT);
-  }
-
-  private static String dumpCodepoints(String v) {
-    if (v == null) return "null";
-    StringBuilder sb = new StringBuilder();
-    for (int i = 0; i < v.length(); i++) {
-      sb.append(String.format("U+%04X", (int) v.charAt(i)));
-      if (i < v.length() - 1) sb.append(" ");
-    }
-    return sb.toString();
+    return v.trim().replace("\"", "").replace("'", "").toLowerCase();
   }
 
   private static String clean(Object v) {
@@ -268,7 +223,7 @@ public class UnifiedEventMapper {
 
   private static Severity mapSeverity(String sev) {
     if (sev == null) return Severity.UNKNOWN;
-    String s = sev.trim().toLowerCase(Locale.ROOT);
+    String s = sev.trim().toLowerCase();
     return switch (s) {
       case "critical" -> Severity.CRITICAL;
       case "major" -> Severity.MAJOR;
@@ -282,7 +237,7 @@ public class UnifiedEventMapper {
 
   private static EMSDomain mapDomain(String sourceType) {
     if (sourceType == null) return EMSDomain.UNKNOWN;
-    return switch (sourceType.toLowerCase(Locale.ROOT)) {
+    return switch (sourceType.toLowerCase()) {
       case "mdm" -> EMSDomain.TRANSPORT;
       default -> EMSDomain.UNKNOWN;
     };
@@ -306,8 +261,8 @@ public class UnifiedEventMapper {
     if (obj == null || !obj.isObject()) return null;
     Map<String, String> out = new HashMap<>();
     obj.fields().forEachRemaining(e -> out.put(
-      e.getKey(),
-      e.getValue().isNull() ? null : e.getValue().asText()
+        e.getKey(),
+        e.getValue().isNull() ? null : e.getValue().asText()
     ));
     return out;
   }
