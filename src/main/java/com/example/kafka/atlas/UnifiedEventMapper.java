@@ -4,6 +4,9 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.example.kafka.service.pipeline.TransformContext;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -18,6 +21,8 @@ import gr.ote.atlas.events.models.EnrichedData;
 import gr.ote.atlas.events.models.UnifiedEvent;
 
 public class UnifiedEventMapper {
+
+  private static final Logger log = LoggerFactory.getLogger(UnifiedEventMapper.class);
 
   public UnifiedEvent fromContext(TransformContext ctx) {
 
@@ -75,10 +80,8 @@ public class UnifiedEventMapper {
       // ✅ Robust ExaGrid type decision (do NOT trust YAML for this)
       String exaType = classifyExaGridType(egSev);
 
-      System.out.println(
-        "EXAGRID sanity: egSev=[" + egSev + "] normalized=[" + normalize(egSev) + "]"
-        + " => exaType=[" + exaType + "] ctx.type=[" + typeStr + "] ctx.sev=[" + sevStr + "]"
-      );
+      log.info("EXAGRID sanity: egSev=[{}] normalized=[{}] => exaType=[{}] ctx.type=[{}] ctx.sev=[{}]",
+         egSev, normalize(egSev), exaType, typeStr, sevStr);
 
       ue.setType(mapEventType(exaType));
 
