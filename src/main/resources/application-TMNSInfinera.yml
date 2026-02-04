@@ -142,41 +142,23 @@ transform:
   # ───────────────────────────── TMNS Infinera / Telegraf flow (KAFKA) ─────────────────────────────
   kafka:
     pipeline:
-      # 0) Whole Telegraf message as sourceEvent
+      # 0) Whole Telegraf message as sourceEvent (same proven pattern as ExaGrid)
       - type: extract
         failOnMissing: false
         failOnBadJson: true
         mappings:
-          tgFields: "/fields"
-          tgTags: "/tags"
-          tgName: "/name"
+          sourceEvent: "/"
           telegrafTsSecRaw: "/timestamp"
-          rawRoot: "/"
-    
+
       # 0b) Telegraf seconds -> ms
       - type: update
         compute:
           - set: telegrafTsMs
             expr: "telegrafTsSecRaw != null ? (TO_NUMBER(telegrafTsSecRaw) * 1000) : null"
 
-          # Explicitly build sourceEvent as TelegrafGenericEvent
-          # (Many pipelines support setting nested JSON paths like this)
-          - set: sourceEvent.@type
-            expr: "'TelegrafGenericEvent'"
-          - set: sourceEvent.fields
-            expr: "tgFields"
-          - set: sourceEvent.tags
-            expr: "tgTags"
-          - set: sourceEvent.name
-            expr: "tgName"
-          - set: sourceEvent.timestamp
-            expr: "telegrafTsSecRaw"   # keep original seconds inside sourceEvent (like telegraf)
-          - set: sourceEvent.raw
-            expr: "rawRoot"            # optional: keep the full raw doc too (handy for debug)
-
       # 1) Extract TNMS fields
       - type: extract
-        fromVar: rawRoot
+        fromVar: sourceEvent
         failOnMissing: false
         failOnBadJson: false
         mappings:
@@ -184,42 +166,40 @@ transform:
           tnmsEntity: "/fields/enmsAlEntityString"
           tnmsAlState: "/fields/enmsAlState"
           tnmsTimeStampStr: "/fields/enmsAlTimeStamp"
+
           tnmsNeIdName: "/fields/enmsTrapNeIdName"
           tnmsNeName: "/fields/enmsNeName"
+
           tnmsProbableCauseString: "/fields/enmsTrapEventProbableCauseString"
           tnmsSeverityRaw: "/fields/enmsTrapEventSeverity"
-    
+
       # 2) Fill UE fields that the mapper reads from ctx
       - type: update
         compute:
-          # fixed identifiers
           - set: sourceEms
             expr: "'INFINERA_TNMS'"
           - set: emsVendorID
             expr: "'TNMS'"
           - set: emsDomain
             expr: "'TRANSPORT'"
-    
-          # alarmType = enmsAlClass (UnifiedEvent has no alarmType -> store as alarmIdentifier)
+
+          # alarmType = enmsAlClass -> store into alarmIdentifier (since UE has no alarmType)
           - set: alarmIdentifier
             expr: "tnmsAlClass != null ? '' + tnmsAlClass : null"
-    
-          # requested mappings
+
           - set: neEquipment
             expr: "COALESCE(tnmsEntity, '')"
-    
-          # neName = "enmsTrapNeIdName, enmsNeName" (only if both exist)
+
+          # neName = "enmsTrapNeIdName, enmsNeName"
           - set: neName
             expr: >
               (tnmsNeIdName != null && TRIM(tnmsNeIdName) != '' && tnmsNeName != null && TRIM(tnmsNeName) != '')
-              ? (tnmsNeIdName + ',' + tnmsNeName)
-              : (tnmsNeIdName != null && TRIM(tnmsNeIdName) != '' ? tnmsNeIdName : tnmsNeName)
-    
+              ? (TRIM(tnmsNeIdName) + ',' + TRIM(tnmsNeName))
+              : (tnmsNeIdName != null && TRIM(tnmsNeIdName) != '' ? TRIM(tnmsNeIdName) : TRIM(COALESCE(tnmsNeName, '')))
+
           - set: faultId
             expr: "COALESCE(tnmsProbableCauseString, '')"
-    
-          # --- Severity mapping: enmsTrapEventSeverity -> Severity enum strings ---
-          # 0=cleared,1=warning,2=minor,3=major,4=critical else UNKNOWN
+
           - set: severity
             expr: >
               (tnmsSeverityRaw == 0) ? 'CLEARED'
@@ -228,36 +208,22 @@ transform:
               : (tnmsSeverityRaw == 3) ? 'MAJOR'
               : (tnmsSeverityRaw == 4) ? 'CRITICAL'
               : 'UNKNOWN'
-    
-          # --- Type mapping: enmsAlState -> EventType enum strings ---
-          # 1=noAlarm -> CLEAR
-          # 2=acknowledged -> ACKNOWLEDGE
-          # 3=unAcknowledged -> UNACKNOWLEDGE
+
           - set: type
             expr: >
               (tnmsAlState == 1) ? 'CLEAR'
               : (tnmsAlState == 2) ? 'ACKNOWLEDGE'
               : (tnmsAlState == 3) ? 'UNACKNOWLEDGE'
               : 'UNKNOWN'
-    
-          # --- Timestamp ---
-          # enmsAlTimeStamp is string "yyyy-MM-dd HH:mm:ss".
-          # If your expression engine has NO string->epoch parser, use telegrafTsMs.
-          #
-          # Option A (safe default): use telegraf ms
+
+          # timestamp in ms (consistent with your Java mapper expectations)
           - set: timestamp
             expr: "telegrafTsMs"
-    
-          # Option B (if you DO have a parser function in your engine)
-          # Uncomment and adjust function name if supported in your framework:
-          #
-          # - set: timestamp
-          #   expr: "tnmsTimeStampStr != null ? PARSE_EPOCH_MS(tnmsTimeStampStr, 'yyyy-MM-dd HH:mm:ss') : telegrafTsMs"
-    
-          # optional (not requested) serialNo: keep empty unless you want to store something unique
+
+          # prefer null, not empty string
           - set: serialNo
-            expr: "''" # expr: "null"
-    
+            expr: "null"
+
       # 3) Build UnifiedEvent JSON
       - type: unifiedEvent
         target: "$"

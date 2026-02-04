@@ -1,6 +1,9 @@
 package com.example.kafka.atlas;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -79,7 +82,12 @@ public class UnifiedEventMapper {
         ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
         ue.setType(mapEventType(typeStr));
         ue.setSeverity(mapSeverity(sevStr));
-        ue.setTimestamp(parseEventTime(tsMs, eventTime));
+        Long tnmsMs = null;
+        if (looksLikeTelegraf(sourceEventNode)) {
+          JsonNode f = sourceEventNode.get("fields");
+          tnmsMs = tnmsTimestampToMs(getText(f, "enmsAlTimeStamp"));
+        }
+        ue.setTimestamp(parseEventTime(firstNonNull(tnmsMs, tsMs), eventTime));
 
         ue.setSerialNo(serialNo);
         ue.setFaultId(faultId);
@@ -347,6 +355,25 @@ public class UnifiedEventMapper {
     // millis already
     if (d >= 1e12) return (long) Math.round(d);
     return null;
+  }
+
+  // TNMS timestamp: "yyyy-MM-dd HH:mm:ss" (no timezone in string)
+  private static final DateTimeFormatter TNMS_TS_FMT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+  
+  // Choose the zone TNMS uses for that string.
+  // If TNMS timestamps are local Greek time, keep Europe/Athens.
+  // If they are UTC, change to ZoneId.of("UTC").
+  private static final ZoneId TNMS_ZONE = ZoneId.of("Europe/Athens");
+  
+  private static Long tnmsTimestampToMs(String tsStr) {
+    if (tsStr == null || tsStr.isBlank()) return null;
+    try {
+      LocalDateTime ldt = LocalDateTime.parse(tsStr.trim(), TNMS_TS_FMT);
+      return ldt.atZone(TNMS_ZONE).toInstant().toEpochMilli();
+    } catch (Exception ignore) {
+      return null;
+    }
   }
 
   private static String getText(JsonNode n, String field) {
