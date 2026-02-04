@@ -27,6 +27,14 @@ public class UnifiedEventMapper {
 
   private static final Logger log = LoggerFactory.getLogger(UnifiedEventMapper.class);
 
+  // TNMS timestamp: "yyyy-MM-dd HH:mm:ss" (no timezone in string)
+  private static final DateTimeFormatter TNMS_TS_FMT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+  // Choose the zone TNMS uses for that string.
+  // If TNMS timestamps are UTC, change to ZoneId.of("UTC").
+  private static final ZoneId TNMS_ZONE = ZoneId.of("Europe/Athens");
+
   public UnifiedEvent fromContext(TransformContext ctx) {
 
     JsonNode sourceEventNode = ctx.get("sourceEvent");
@@ -82,16 +90,28 @@ public class UnifiedEventMapper {
         ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
         ue.setType(mapEventType(typeStr));
         ue.setSeverity(mapSeverity(sevStr));
+
+        // Prefer TNMS alarm timestamp (string) over ctx timestamp
         Long tnmsMs = null;
-        if (looksLikeTelegraf(sourceEventNode)) {
-          JsonNode f = sourceEventNode.get("fields");
-          tnmsMs = tnmsTimestampToMs(getText(f, "enmsAlTimeStamp"));
-        }
+        JsonNode f = sourceEventNode != null ? sourceEventNode.get("fields") : null;
+        tnmsMs = tnmsTimestampToMs(getText(f, "enmsAlTimeStamp"));
         ue.setTimestamp(parseEventTime(firstNonNull(tnmsMs, tsMs), eventTime));
 
         ue.setSerialNo(serialNo);
         ue.setFaultId(faultId);
         ue.setNeName(neName);
+
+        // ✅ Fallback: build neName from Telegraf fields if YAML didn't populate it
+        if (ue.getNeName() == null) {
+          String a = getText(f, "enmsTrapNeIdName");
+          String b = getText(f, "enmsNeName");
+          String combined =
+              (a != null && !a.isBlank() && b != null && !b.isBlank()) ? (a.trim() + ", " + b.trim())
+            : (a != null && !a.isBlank()) ? a.trim()
+            : (b != null && !b.isBlank()) ? b.trim()
+            : null;
+          ue.setNeName(combined);
+        }
 
         // TNMS uses ctx.neEquipment (from YAML), but keep compatibility with older flows
         ue.setNeEquipment(firstNonBlank(neEquipmentFromCtx, affectedObjectName, ""));
@@ -267,7 +287,6 @@ public class UnifiedEventMapper {
       case "SYNC_START" -> EventType.SYNC_START;
       case "SYNC_END" -> EventType.SYNC_END;
 
-      // ✅ Added (needed for TNMS AlarmState mapping)
       case "ACKNOWLEDGE" -> EventType.ACKNOWLEDGE;
       case "UNACKNOWLEDGE" -> EventType.UNACKNOWLEDGE;
 
@@ -357,15 +376,6 @@ public class UnifiedEventMapper {
     return null;
   }
 
-  // TNMS timestamp: "yyyy-MM-dd HH:mm:ss" (no timezone in string)
-  private static final DateTimeFormatter TNMS_TS_FMT =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-  
-  // Choose the zone TNMS uses for that string.
-  // If TNMS timestamps are local Greek time, keep Europe/Athens.
-  // If they are UTC, change to ZoneId.of("UTC").
-  private static final ZoneId TNMS_ZONE = ZoneId.of("Europe/Athens");
-  
   private static Long tnmsTimestampToMs(String tsStr) {
     if (tsStr == null || tsStr.isBlank()) return null;
     try {
