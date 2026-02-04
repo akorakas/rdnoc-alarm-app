@@ -28,25 +28,26 @@ public class UnifiedEventMapper {
 
     JsonNode sourceEventNode = ctx.get("sourceEvent");
 
-    String eventTime = ctx.get("eventTime"); // NSP subscription only (ISO)
-    Object tsObj     = ctx.get("timestamp"); // can be ms/sec/decimal-sec depending on flow
+    String eventTime = ctx.get("eventTime");   // NSP subscription only (ISO)
+    Object tsObj     = ctx.get("timestamp");   // can be ms/sec/decimal-sec depending on flow
     Long tsMs        = toEpochMillis(tsObj);
 
-    String typeStr   = clean(ctx.get("type"));      // YAML computed: EVENT/FAULT/CLEAR...
-    String sevStr    = clean(ctx.get("severity"));  // YAML computed (optional)
+    String typeStr   = clean(ctx.get("type"));       // YAML computed: EVENT/FAULT/CLEAR/ACKNOWLEDGE...
+    String sevStr    = clean(ctx.get("severity"));   // YAML computed (optional)
 
     String emsDomainRaw = clean(ctx.get("emsDomain"));
     String neId = clean(ctx.get("neId"));
     String neName = clean(ctx.get("neName"));
     String affectedObjectName = clean(ctx.get("affectedObjectName"));
+    String neEquipmentFromCtx = clean(ctx.get("neEquipment"));
     String faultId = clean(ctx.get("faultId"));
     String serialNo = clean(ctx.get("serialNo"));
     String alarmIdentifier = clean(ctx.get("alarmIdentifier"));
     String objectFullName = clean(ctx.get("objectFullName"));
 
-    // allow YAML override (EXAGRID)
-    String sourceEmsRaw = clean(ctx.get("sourceEms"));     // "EXAGRID" or null
-    String vendorRaw    = clean(ctx.get("emsVendorID"));   // "UNKNOWN" or null
+    // allow YAML override (EXAGRID / INFINERA_TNMS etc.)
+    String sourceEmsRaw = clean(ctx.get("sourceEms"));
+    String vendorRaw    = clean(ctx.get("emsVendorID"));
 
     UnifiedEvent ue = new UnifiedEvent();
 
@@ -57,48 +58,38 @@ public class UnifiedEventMapper {
     ue.setEmsVendorID(vendor);
 
     // ------------------------------------------------------------------
-    // ExaGrid / Telegraf mapping (from fields.egEventParams*)
+    // TELEGRAF FLOWS
+    //   - EXAGRID: special field extraction + type classification, severity always UNKNOWN
+    //   - INFINERA_TNMS: trust YAML computed fields, but force sourceEvent to TelegrafGenericEvent
     // ------------------------------------------------------------------
-    if (sourceEms == EMSId.EXAGRID && looksLikeTelegraf(sourceEventNode)) {
+    boolean isTelegraf = looksLikeTelegraf(sourceEventNode);
+    boolean isExaGrid  = sourceEms == EMSId.EXAGRID;
+    boolean isTnms     = sourceEms == EMSId.INFINERA_TNMS;
 
-      JsonNode fields = sourceEventNode.get("fields");
+    if (isTelegraf && (isExaGrid || isTnms)) {
 
-      String egId       = getText(fields, "egEventParamsId");
-      String egName     = getText(fields, "egEventParamsName");
-      String egDevName  = getText(fields, "egEventParamsDeviceName");
-      String egSev      = getText(fields, "egEventParamsSeverity");       // "Error", "Audit", "Info", ...
-      String egCreateMs = getText(fields, "egEventParamsCreateTimeRaw");  // millis as string
+      // Always preserve the raw Telegraf payload as a TelegrafGenericEvent
+      ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode));
 
-      // required UE fields per your spec
-      ue.setEmsDomain(EMSDomain.UNKNOWN);
-      ue.setSerialNo(egId);
-      ue.setFaultId(egName);
-      ue.setNeName(egDevName);
-      ue.setNeEquipment("");            // explicitly blank
-      ue.setAlarmIdentifier(null);      // explicitly null for now
+      if (isExaGrid) {
+        applyExaGridMapping(ue, sourceEventNode, tsMs, eventTime, typeStr, sevStr);
+      } else {
+        // INFINERA_TNMS (and future Telegraf-based non-ExaGrid flows):
+        // Use YAML-provided ctx fields for UnifiedEvent properties.
+        ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
+        ue.setType(mapEventType(typeStr));
+        ue.setSeverity(mapSeverity(sevStr));
+        ue.setTimestamp(parseEventTime(tsMs, eventTime));
 
-      // ✅ Robust ExaGrid type decision (do NOT trust YAML for this)
-      String exaType = classifyExaGridType(egSev);
+        ue.setSerialNo(serialNo);
+        ue.setFaultId(faultId);
+        ue.setNeName(neName);
 
-      log.info("EXAGRID sanity: egSev=[{}] normalized=[{}] => exaType=[{}] ctx.type=[{}] ctx.sev=[{}]",
-         egSev, normalize(egSev), exaType, typeStr, sevStr);
+        // TNMS uses ctx.neEquipment (from YAML), but keep compatibility with older flows
+        ue.setNeEquipment(firstNonBlank(neEquipmentFromCtx, affectedObjectName, ""));
 
-      ue.setType(mapEventType(exaType));
-
-      // You want severity always UNKNOWN for ExaGrid output
-      ue.setSeverity(Severity.UNKNOWN);
-
-      // timestamp: prefer egEventParamsCreateTimeRaw, else ctx.timestamp, else eventTime
-      Long egTsMs = toEpochMillis(egCreateMs);
-      ue.setTimestamp(parseEventTime(firstNonNull(egTsMs, tsMs), eventTime));
-
-      // keep original raw telegraf payload as sourceEvent
-      TelegrafGenericEvent t = new TelegrafGenericEvent();
-      t.setFields(asStringMap(sourceEventNode.get("fields")));
-      t.setTags(asStringMap(sourceEventNode.get("tags")));
-      // telegraf "timestamp" is usually seconds
-      t.setTimestamp(toEpochSecondsLong(sourceEventNode.get("timestamp")));
-      ue.setSourceEvent(t);
+        ue.setAlarmIdentifier(alarmIdentifier);
+      }
 
     } else {
 
@@ -164,19 +155,69 @@ public class UnifiedEventMapper {
     return ue;
   }
 
-  // ---------------- ExaGrid helpers ----------------
+  // ============================================================================================
+  // EXAGRID mapping (preserves your existing behavior)
+  // ============================================================================================
+
+  private void applyExaGridMapping(UnifiedEvent ue,
+                                  JsonNode sourceEventNode,
+                                  Long tsMs,
+                                  String eventTime,
+                                  String typeStr,
+                                  String sevStr) {
+
+    JsonNode fields = sourceEventNode != null ? sourceEventNode.get("fields") : null;
+
+    String egId       = getText(fields, "egEventParamsId");
+    String egName     = getText(fields, "egEventParamsName");
+    String egDevName  = getText(fields, "egEventParamsDeviceName");
+    String egSev      = getText(fields, "egEventParamsSeverity");       // "Error", "Audit", "Info", ...
+    String egCreateMs = getText(fields, "egEventParamsCreateTimeRaw");  // millis as string
+
+    // required UE fields per your spec
+    ue.setEmsDomain(EMSDomain.UNKNOWN);
+    ue.setSerialNo(egId);
+    ue.setFaultId(egName);
+    ue.setNeName(egDevName);
+    ue.setNeEquipment("");            // explicitly blank
+    ue.setAlarmIdentifier(null);      // explicitly null for now
+
+    // Robust ExaGrid type decision (do NOT trust YAML for this)
+    String exaType = classifyExaGridType(egSev);
+
+    log.info("EXAGRID sanity: egSev=[{}] normalized=[{}] => exaType=[{}] ctx.type=[{}] ctx.sev=[{}]",
+        egSev, normalize(egSev), exaType, typeStr, sevStr);
+
+    ue.setType(mapEventType(exaType));
+
+    // You want severity always UNKNOWN for ExaGrid output
+    ue.setSeverity(Severity.UNKNOWN);
+
+    // timestamp: prefer egEventParamsCreateTimeRaw, else ctx.timestamp, else eventTime
+    Long egTsMs = toEpochMillis(egCreateMs);
+    ue.setTimestamp(parseEventTime(firstNonNull(egTsMs, tsMs), eventTime));
+  }
 
   private static String classifyExaGridType(String egSeverityRaw) {
     String s = normalize(egSeverityRaw);
-
-    // your exact requirement:
     // Error => FAULT, Info/Audit/etc => EVENT
     if ("error".equals(s)) return "FAULT";
-
-    // If you later want these to be FAULT too, uncomment:
-    // if ("critical".equals(s) || "major".equals(s) || "minor".equals(s) || "warning".equals(s)) return "FAULT";
-
     return "EVENT";
+  }
+
+  // ============================================================================================
+  // Helpers
+  // ============================================================================================
+
+  private static TelegrafGenericEvent toTelegrafGenericEvent(JsonNode sourceEventNode) {
+    TelegrafGenericEvent t = new TelegrafGenericEvent();
+    if (sourceEventNode == null) return t;
+
+    t.setFields(asStringMap(sourceEventNode.get("fields")));
+    t.setTags(asStringMap(sourceEventNode.get("tags")));
+    // telegraf "timestamp" is usually seconds
+    t.setTimestamp(toEpochSecondsLong(sourceEventNode.get("timestamp")));
+    return t;
   }
 
   private static String normalize(String v) {
@@ -193,8 +234,6 @@ public class UnifiedEventMapper {
     return s.isEmpty() ? null : s;
   }
 
-  // ---------------- existing helpers ----------------
-
   private static Instant parseEventTime(Long tsMs, String eventTime) {
     if (tsMs != null && tsMs > 0) return Instant.ofEpochMilli(tsMs);
     if (eventTime != null && !eventTime.isBlank()) {
@@ -207,7 +246,6 @@ public class UnifiedEventMapper {
     if (type == null) return EventType.FAULT;
 
     String t = type.trim();
-
     if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith("\"") && t.endsWith("\""))) {
       t = t.substring(1, t.length() - 1).trim();
     }
@@ -220,6 +258,11 @@ public class UnifiedEventMapper {
       case "FAULT_SYNC" -> EventType.FAULT_SYNC;
       case "SYNC_START" -> EventType.SYNC_START;
       case "SYNC_END" -> EventType.SYNC_END;
+
+      // ✅ Added (needed for TNMS AlarmState mapping)
+      case "ACKNOWLEDGE" -> EventType.ACKNOWLEDGE;
+      case "UNACKNOWLEDGE" -> EventType.UNACKNOWLEDGE;
+
       default -> EventType.UNKNOWN;
     };
   }

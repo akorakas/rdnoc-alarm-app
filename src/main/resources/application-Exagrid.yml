@@ -1,0 +1,352 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# rdnoc-alarm-app :: application.yml  (UPDATED for UnifiedEvent step + alarmCreate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus,env,info
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    kafka:
+      enabled: true
+  metrics:
+    tags:
+      app: rdnoc-alarm-app-exagrid
+      instance: ${HOSTNAME:local}
+
+app:
+  inputs:
+    kafka:
+      enabled: true
+    rest:
+      enabled: false
+
+  kafka:
+    mode: static
+    input-topic: "snmp-traps-exagrid"
+    verify-input-topic: true
+    verify-timeout-sec: 10
+    start-listeners-after-verify: true
+
+    output:
+      validate-partitions-on-startup: false
+      validate-partitions-timeout-sec: 10
+
+  sync:
+    enabled: false
+    run-on-startup: false
+
+  nsp:
+    subscription:
+      create-on-startup: false
+      renew-enabled: false
+
+  sinks:
+    output:
+      type: kafka
+      topic: nsp-atnoi-test-prod
+     #type: file
+     #file: /tmp/out.ndjson
+    dlt:
+      type: file
+      file: /tmp/dlt.ndjson
+    error:
+      type: file
+      file: /tmp/error.ndjson
+
+spring:
+  jackson:
+    deserialization:
+      read-date-timestamps-as-nanoseconds: false
+      fail-on-unknown-properties: false
+    serialization:
+      write-dates-as-timestamps: false
+
+  kafka:
+    consumer:
+      bootstrap-servers: atlas-dev.tmn.ote.gr:32100
+      group-id: exagrid-snmp-traps-01
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        "[client.id]": kafka-app-consumer_sub
+        "[max.poll.records]": 10000
+        "[max.poll.interval.ms]": 600000
+        "[default.api.timeout.ms]": 60000
+        "[request.timeout.ms]": 30000
+        "[fetch.min.bytes]": 1048576
+        "[fetch.max.wait.ms]": 50
+        "[partition.assignment.strategy]": org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+        "[allow.auto.create.topics]": false
+
+        "[security.protocol]": SASL_SSL
+        "[sasl.mechanism]": SCRAM-SHA-512
+        "[sasl.jaas.config]": |
+          org.apache.kafka.common.security.scram.ScramLoginModule required
+          username="performance" password="tABYc79BRgTwTySU0rJM0lotoB25Mf";
+        "[ssl.truststore.type]": JKS
+        "[ssl.truststore.location]": "/app/certs/kafka-truststore.jks"
+        "[ssl.truststore.password]": "changeit"
+
+    producer:
+      bootstrap-servers: atlas-dev.tmn.ote.gr:32100
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        "[client.id]": kafka-app-producer_sub
+        "[security.protocol]": SASL_SSL
+        "[sasl.mechanism]": SCRAM-SHA-512
+        "[sasl.jaas.config]": |
+          org.apache.kafka.common.security.scram.ScramLoginModule required
+          username="performance" password="tABYc79BRgTwTySU0rJM0lotoB25Mf";
+        "[ssl.truststore.type]": JKS
+        "[ssl.truststore.location]": "/app/certs/kafka-truststore.jks"
+        "[ssl.truststore.password]": "changeit"
+
+
+        "[enable.idempotence]": true
+        "[max.in.flight.requests.per.connection]": 5
+        "[retries]": 2147483647
+        "[linger.ms]": 5
+        "[batch.size]": 65536
+        "[compression.type]": lz4
+        "[request.timeout.ms]": 5000
+        "[max.block.ms]": 5000
+        "[allow.auto.create.topics]": false
+
+    listener:
+      concurrency: 1
+      ack-mode: BATCH
+      auto-startup: false
+      missing-topics-fatal: true
+
+transform:
+  templates:
+    enabled: false
+
+  placeholder: "{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}"
+  validate-on-start: false
+  validate-template-on-start: false
+
+  # ───────────────────────────── ExaGrid / Telegraf flow (KAFKA) ─────────────────────────────
+  kafka:
+    pipeline:
+      # 0) Whole Telegraf message as sourceEvent
+      - type: extract
+        failOnMissing: false
+        failOnBadJson: true
+        mappings:
+          sourceEvent: "/"
+          telegrafTsSecRaw: "/timestamp"
+
+      # 0b) Telegraf seconds -> ms
+      - type: update
+        compute:
+          - set: telegrafTsMs
+            expr: "telegrafTsSecRaw != null ? (TO_NUMBER(telegrafTsSecRaw) * 1000) : null"
+
+      # 1) Extract ExaGrid fields
+      - type: extract
+        fromVar: sourceEvent
+        failOnMissing: false
+        failOnBadJson: false
+        mappings:
+          egId: "/fields/egEventParamsId"
+          egName: "/fields/egEventParamsName"
+          egDeviceName: "/fields/egEventParamsDeviceName"
+          egSeverityRaw: "/fields/egEventParamsSeverity"
+          egCreateTimeRaw: "/fields/egEventParamsCreateTimeRaw"
+          egText: "/fields/egEventParamsText"
+          egDetail: "/fields/egEventParamsDetail"
+
+      # 2) Fill UE fields that the mapper reads from ctx
+      - type: update
+        compute:
+          - set: sourceEms
+            expr: "'EXAGRID'"
+          - set: emsVendorID
+            expr: "'UNKNOWN'"
+          - set: emsDomain
+            expr: "'UNKNOWN'"
+
+          - set: serialNo
+            expr: "egId"
+          - set: faultId
+            expr: "egName"
+          - set: neName
+            expr: "egDeviceName"
+          - set: neEquipment
+            expr: "''"
+          - set: alarmIdentifier
+            expr: "null"
+
+          # timestamp in ms (prefer ExaGrid raw ms, else telegraf ms)
+          - set: timestamp
+            expr: "egCreateTimeRaw != null ? TO_NUMBER(egCreateTimeRaw) : telegrafTsMs"
+
+          # always UNKNOWN for ExaGrid output
+          - set: severity
+            expr: "'UNKNOWN'"
+
+          # normalize severity for comparisons
+          - set: egSeverityNorm
+            expr: "LOWER(TRIM(COALESCE(egSeverityRaw, '')))"
+
+      # 3) FINAL type decision (robust)
+      - type: update
+        compute:
+          - set: type
+            expr: "egSeverityNorm == 'error' || egSeverityNorm == 'critical' || egSeverityNorm == 'warning' || egSeverityNorm == 'major' || egSeverityNorm == 'minor' ? 'FAULT' : 'EVENT'"
+
+      # 4) Build UnifiedEvent JSON
+      - type: unifiedEvent
+        target: "$"
+
+      # 0) Get the notification object from the wrapper
+#      - type: extract
+#        failOnMissing: false
+#        failOnBadJson: true
+#        mappings:
+#          notificationFromEnvelope: "/payload/data/ietf-restconf:notification"
+#          notificationFromTopic: "/data/ietf-restconf:notification"
+#          notificationDirect: "/ietf-restconf:notification"
+#          rootDoc: "/"
+#
+#      # 0b) Choose notification from whichever exists
+#      - type: update
+#        compute:
+#          - set: notification
+#            expr: "notificationFromEnvelope != null ? notificationFromEnvelope : (notificationFromTopic != null ? notificationFromTopic : (notificationDirect != null ? notificationDirect : rootDoc))"
+#
+#      # 1) From the notification, pick alarm-change / alarm-delete / alarm-create
+#      - type: extract
+#        fromVar: notification
+#        failOnMissing: false
+#        failOnBadJson: true
+#        mappings:
+#          eventTime: "/eventTime"
+#          alarmChange: "/nsp-fault:alarm-change"
+#          alarmDelete: "/nsp-fault:alarm-delete"
+#          alarmCreate: "/nsp-fault:alarm-create"
+#
+#      # 2) Choose which alarm node we will process; also set sourceEvent to that node
+#      - type: update
+#        compute:
+#          - set: alarmNode
+#            expr: "alarmChange != null ? alarmChange : (alarmCreate != null ? alarmCreate : alarmDelete)"
+#          - set: sourceEvent
+#            expr: "alarmNode"
+#          - set: alarmEventKind
+#            expr: "alarmDelete != null ? 'DELETE' : (alarmCreate != null ? 'CREATE' : (alarmChange != null ? 'CHANGE' : 'UNKNOWN'))"
+#
+#      # 2b) Extract delete objectId if alarm-delete
+#      - type: extract
+#        fromVar: alarmDelete
+#        failOnMissing: false
+#        failOnBadJson: false
+#        mappings:
+#          deleteObjectId: "/objectId"
+#
+#      # 3) Extract fields from alarmNode (common)
+#      - type: extract
+#        fromVar: alarmNode
+#        failOnMissing: false
+#        failOnBadJson: false
+#        mappings:
+#          emsDomain: "/sourceType"
+#          faultId: "/alarmName"
+#          neId: "/neId"
+#          affectedObjectName: "/affectedObjectName"
+#          neName: "/neName"
+#          serialNo: "/objectId"
+#          probableCause: "/probableCause"
+#          alarmType: "/alarmType"
+#          objectFullName: "/objectFullName"
+#
+#      # 4) Optional fields (never fail)
+#      - type: extract
+#        fromVar: alarmNode
+#        failOnMissing: false
+#        failOnBadJson: false
+#        mappings:
+#          severityNew: "severity.new-value"
+#          severityRaw: "/severity"
+#          previousSeverityNew: "previousSeverity.new-value"
+#          previousSeverityRaw: "/previousSeverity"
+#          lastTimeDetectedNew: "lastTimeDetected.new-value"
+#          lastTimeDetectedOld: "lastTimeDetected.old-value"
+#          impact: "/impact"
+#          serviceAffecting: "/serviceAffecting"
+#          fdn: "/fdn"
+#          objectId: "/objectId"
+#          firstTimeDetected: "/firstTimeDetected"
+#          lastTimeDetected: "/lastTimeDetected"
+#          originalSeverity: "/originalSeverity"
+#          sourceSystem: "/sourceSystem"
+#
+#      # 5) Compute normalized fields
+#      - type: update
+#        compute:
+#          - set: severity
+#            expr: "UPPER(COALESCE(severityNew, severityRaw))"
+#          # ✅ Pick a scalar ms timestamp (prefer new-value, then old-value, then scalar)
+#          - set: timestampMs
+#            expr: "COALESCE(lastTimeDetectedNew, lastTimeDetectedOld, lastTimeDetected)"
+#          # ✅ Force lastTimeDetected to be scalar (prevents mapper seeing an object and producing 0)
+#          - set: lastTimeDetected
+#            expr: "timestampMs"
+#
+#          - set: timestamp
+#            expr: "timestampMs"
+#
+#          # ✅ Detect delta presence
+#          - set: hasLastTimeDetectedDelta
+#            expr: "lastTimeDetectedNew != null ? 'true' : (lastTimeDetectedOld != null ? 'true' : 'false')"
+#
+#          # ✅ Your requested logic:
+#          #    - if delta exists -> CHANGE
+#          #    - else if scalar exists -> FAULT
+#          - set: changeType
+#            expr: "hasLastTimeDetectedDelta == 'true' ? 'CHANGE' : (timestampMs != null ? 'FAULT' : 'UNKNOWN')"
+#
+#          - set: type
+#            expr: "alarmEventKind == 'DELETE' ? 'CLEAR' : (alarmEventKind == 'CREATE' ? 'FAULT' : (alarmEventKind == 'CHANGE' ? changeType : 'UNKNOWN'))"
+#
+#          - set: impactSafe
+#            expr: "impact != null ? impact : 0"
+#          - set: serviceAffectingSafe
+#            expr: "serviceAffecting == null ? 'null' : (serviceAffecting == true ? 'true' : 'false')"
+#          - set: prevSeverity
+#            expr: "UPPER(COALESCE(previousSeverityNew, previousSeverityRaw))"
+#          - set: alarmIdentifier
+#            expr: "objectFullName != null ? objectFullName : (faultId != null ? faultId : deleteObjectId)"
+#          - set: faultId
+#            expr: "faultId != null ? faultId : deleteObjectId"
+#          - set: emsDomain
+#            expr: "emsDomain != null ? emsDomain : 'UNKNOWN'"
+#          - set: timestampSec
+#            expr: "timestamp != null ? (timestamp / 1000) : null"
+#
+#      - type: neNameEnrich
+#
+#      # NEW: Build UnifiedEvent (writes final JSON to ctx.rendered / "$")
+#      - type: unifiedEvent
+#        target: "$"
+
+logging:
+  level:
+    "[org.apache.kafka.clients.NetworkClient]": INFO
+    "[org.apache.kafka.common.network]": INFO
+    "[org.springframework.kafka]": INFO
+    # "[com.example.kafka]": DEBUG

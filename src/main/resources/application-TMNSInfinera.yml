@@ -1,0 +1,270 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# rdnoc-alarm-app :: application.yml  (UPDATED for UnifiedEvent step + alarmCreate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus,env,info
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    kafka:
+      enabled: true
+  metrics:
+    tags:
+      app: rdnoc-alarm-app-tmns-infinera
+      instance: ${HOSTNAME:local}
+
+app:
+  inputs:
+    kafka:
+      enabled: true
+    rest:
+      enabled: false
+
+  kafka:
+    mode: static
+    input-topic: "snmp-traps-tmnsinfinera"
+    verify-input-topic: true
+    verify-timeout-sec: 10
+    start-listeners-after-verify: true
+
+    output:
+      validate-partitions-on-startup: false
+      validate-partitions-timeout-sec: 10
+
+  sync:
+    enabled: false
+    run-on-startup: false
+
+  nsp:
+    subscription:
+      create-on-startup: false
+      renew-enabled: false
+
+  sinks:
+    output:
+      type: kafka
+      topic: tmns-infinera-test-topic
+     #type: file
+     #file: /tmp/out.ndjson
+    dlt:
+      type: file
+      file: /tmp/dlt.ndjson
+    error:
+      type: file
+      file: /tmp/error.ndjson
+
+spring:
+  jackson:
+    deserialization:
+      read-date-timestamps-as-nanoseconds: false
+      fail-on-unknown-properties: false
+    serialization:
+      write-dates-as-timestamps: false
+
+  kafka:
+    consumer:
+      bootstrap-servers: atlas-dev.tmn.ote.gr:32100
+      group-id: infinera-snmp-traps-01
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        "[client.id]": kafka-app-consumer_sub
+        "[max.poll.records]": 10000
+        "[max.poll.interval.ms]": 600000
+        "[default.api.timeout.ms]": 60000
+        "[request.timeout.ms]": 30000
+        "[fetch.min.bytes]": 1048576
+        "[fetch.max.wait.ms]": 50
+        "[partition.assignment.strategy]": org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+        "[allow.auto.create.topics]": false
+
+        "[security.protocol]": SASL_SSL
+        "[sasl.mechanism]": SCRAM-SHA-512
+        "[sasl.jaas.config]": |
+          org.apache.kafka.common.security.scram.ScramLoginModule required
+          username="performance" password="tABYc79BRgTwTySU0rJM0lotoB25Mf";
+        "[ssl.truststore.type]": JKS
+        "[ssl.truststore.location]": "/app/certs/kafka-truststore.jks"
+        "[ssl.truststore.password]": "changeit"
+
+    producer:
+      bootstrap-servers: atlas-dev.tmn.ote.gr:32100
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        "[client.id]": kafka-app-producer_sub
+        "[security.protocol]": SASL_SSL
+        "[sasl.mechanism]": SCRAM-SHA-512
+        "[sasl.jaas.config]": |
+          org.apache.kafka.common.security.scram.ScramLoginModule required
+          username="performance" password="tABYc79BRgTwTySU0rJM0lotoB25Mf";
+        "[ssl.truststore.type]": JKS
+        "[ssl.truststore.location]": "/app/certs/kafka-truststore.jks"
+        "[ssl.truststore.password]": "changeit"
+
+
+        "[enable.idempotence]": true
+        "[max.in.flight.requests.per.connection]": 5
+        "[retries]": 2147483647
+        "[linger.ms]": 5
+        "[batch.size]": 65536
+        "[compression.type]": lz4
+        "[request.timeout.ms]": 5000
+        "[max.block.ms]": 5000
+        "[allow.auto.create.topics]": false
+
+    listener:
+      concurrency: 1
+      ack-mode: BATCH
+      auto-startup: false
+      missing-topics-fatal: true
+
+transform:
+  templates:
+    enabled: false
+
+  placeholder: "{EVENT.RECOVERY.DATE} {EVENT.RECOVERY.TIME}"
+  validate-on-start: false
+  validate-template-on-start: false
+
+  # ───────────────────────────── TMNS Infinera / Telegraf flow (KAFKA) ─────────────────────────────
+  kafka:
+    pipeline:
+      # 0) Whole Telegraf message as sourceEvent
+      - type: extract
+        failOnMissing: false
+        failOnBadJson: true
+        mappings:
+          tgFields: "/fields"
+          tgTags: "/tags"
+          tgName: "/name"
+          telegrafTsSecRaw: "/timestamp"
+          rawRoot: "/"
+    
+      # 0b) Telegraf seconds -> ms
+      - type: update
+        compute:
+          - set: telegrafTsMs
+            expr: "telegrafTsSecRaw != null ? (TO_NUMBER(telegrafTsSecRaw) * 1000) : null"
+
+          # Explicitly build sourceEvent as TelegrafGenericEvent
+          # (Many pipelines support setting nested JSON paths like this)
+          - set: sourceEvent.@type
+            expr: "'TelegrafGenericEvent'"
+          - set: sourceEvent.fields
+            expr: "tgFields"
+          - set: sourceEvent.tags
+            expr: "tgTags"
+          - set: sourceEvent.name
+            expr: "tgName"
+          - set: sourceEvent.timestamp
+            expr: "telegrafTsSecRaw"   # keep original seconds inside sourceEvent (like telegraf)
+          - set: sourceEvent.raw
+            expr: "rawRoot"            # optional: keep the full raw doc too (handy for debug)
+
+      # 1) Extract TNMS fields
+      - type: extract
+        fromVar: rawRoot
+        failOnMissing: false
+        failOnBadJson: false
+        mappings:
+          tnmsAlClass: "/fields/enmsAlClass"
+          tnmsEntity: "/fields/enmsAlEntityString"
+          tnmsAlState: "/fields/enmsAlState"
+          tnmsTimeStampStr: "/fields/enmsAlTimeStamp"
+          tnmsNeIdName: "/fields/enmsTrapNeIdName"
+          tnmsNeName: "/fields/enmsNeName"
+          tnmsProbableCauseString: "/fields/enmsTrapEventProbableCauseString"
+          tnmsSeverityRaw: "/fields/enmsTrapEventSeverity"
+    
+      # 2) Fill UE fields that the mapper reads from ctx
+      - type: update
+        compute:
+          # fixed identifiers
+          - set: sourceEms
+            expr: "'INFINERA_TNMS'"
+          - set: emsVendorID
+            expr: "'TNMS'"
+          - set: emsDomain
+            expr: "'TRANSPORT'"
+    
+          # alarmType = enmsAlClass (UnifiedEvent has no alarmType -> store as alarmIdentifier)
+          - set: alarmIdentifier
+            expr: "tnmsAlClass != null ? '' + tnmsAlClass : null"
+    
+          # requested mappings
+          - set: neEquipment
+            expr: "COALESCE(tnmsEntity, '')"
+    
+          # neName = "enmsTrapNeIdName, enmsNeName" (only if both exist)
+          - set: neName
+            expr: >
+              (tnmsNeIdName != null && TRIM(tnmsNeIdName) != '' && tnmsNeName != null && TRIM(tnmsNeName) != '')
+              ? (tnmsNeIdName + ',' + tnmsNeName)
+              : (tnmsNeIdName != null && TRIM(tnmsNeIdName) != '' ? tnmsNeIdName : tnmsNeName)
+    
+          - set: faultId
+            expr: "COALESCE(tnmsProbableCauseString, '')"
+    
+          # --- Severity mapping: enmsTrapEventSeverity -> Severity enum strings ---
+          # 0=cleared,1=warning,2=minor,3=major,4=critical else UNKNOWN
+          - set: severity
+            expr: >
+              (tnmsSeverityRaw == 0) ? 'CLEARED'
+              : (tnmsSeverityRaw == 1) ? 'WARNING'
+              : (tnmsSeverityRaw == 2) ? 'MINOR'
+              : (tnmsSeverityRaw == 3) ? 'MAJOR'
+              : (tnmsSeverityRaw == 4) ? 'CRITICAL'
+              : 'UNKNOWN'
+    
+          # --- Type mapping: enmsAlState -> EventType enum strings ---
+          # 1=noAlarm -> CLEAR
+          # 2=acknowledged -> ACKNOWLEDGE
+          # 3=unAcknowledged -> UNACKNOWLEDGE
+          - set: type
+            expr: >
+              (tnmsAlState == 1) ? 'CLEAR'
+              : (tnmsAlState == 2) ? 'ACKNOWLEDGE'
+              : (tnmsAlState == 3) ? 'UNACKNOWLEDGE'
+              : 'UNKNOWN'
+    
+          # --- Timestamp ---
+          # enmsAlTimeStamp is string "yyyy-MM-dd HH:mm:ss".
+          # If your expression engine has NO string->epoch parser, use telegrafTsMs.
+          #
+          # Option A (safe default): use telegraf ms
+          - set: timestamp
+            expr: "telegrafTsMs"
+    
+          # Option B (if you DO have a parser function in your engine)
+          # Uncomment and adjust function name if supported in your framework:
+          #
+          # - set: timestamp
+          #   expr: "tnmsTimeStampStr != null ? PARSE_EPOCH_MS(tnmsTimeStampStr, 'yyyy-MM-dd HH:mm:ss') : telegrafTsMs"
+    
+          # optional (not requested) serialNo: keep empty unless you want to store something unique
+          - set: serialNo
+            expr: "''" # expr: "null"
+    
+      # 3) Build UnifiedEvent JSON
+      - type: unifiedEvent
+        target: "$"
+
+logging:
+  level:
+    "[org.apache.kafka.clients.NetworkClient]": INFO
+    "[org.apache.kafka.common.network]": INFO
+    "[org.springframework.kafka]": INFO
+    # "[com.example.kafka]": DEBUG
