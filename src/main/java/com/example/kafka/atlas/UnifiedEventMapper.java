@@ -106,7 +106,7 @@ public class UnifiedEventMapper {
           String a = getText(f, "enmsTrapNeIdName");
           String b = getText(f, "enmsNeName");
           String combined =
-              (a != null && !a.isBlank() && b != null && !b.isBlank()) ? (a.trim() + ", " + b.trim())
+              (a != null && !a.isBlank() && b != null && !b.isBlank()) ? (a.trim() + "," + b.trim())
             : (a != null && !a.isBlank()) ? a.trim()
             : (b != null && !b.isBlank()) ? b.trim()
             : null;
