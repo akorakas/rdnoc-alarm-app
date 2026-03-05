@@ -1,6 +1,10 @@
 package com.example.kafka.service.pipeline.steps;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.example.kafka.atlas.UnifiedEventMapper;
+import com.example.kafka.correlate.RedisAlarmInstanceCorrelator;
 import com.example.kafka.service.pipeline.TransformContext;
 import com.example.kafka.service.pipeline.TransformStep;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -10,12 +14,16 @@ import gr.ote.atlas.events.models.UnifiedEvent;
 
 public class UnifiedEventStep implements TransformStep {
 
+  private static final Logger log = LoggerFactory.getLogger(UnifiedEventStep.class);
+
   private final UnifiedEventMapper mapper;
   private final ObjectMapper om;
+  private final RedisAlarmInstanceCorrelator correlator;
 
-  public UnifiedEventStep(UnifiedEventMapper mapper, ObjectMapper om) {
+  public UnifiedEventStep(UnifiedEventMapper mapper, ObjectMapper om, RedisAlarmInstanceCorrelator correlator) {
     this.mapper = mapper;
     this.om = om;
+    this.correlator = correlator;
   }
 
   @Override
@@ -31,6 +39,15 @@ public class UnifiedEventStep implements TransformStep {
 
     UnifiedEvent u = mapper.fromContext(ctx);
 
+    // ✅ Redis correlation BEFORE serialization
+    if (correlator != null) {
+      try {
+        correlator.correlate(u);
+      } catch (Exception e) {
+        log.warn("Redis correlation failed; continuing without correlation", e);
+      }
+    }
+
     // Final output
     ctx.rendered = om.writeValueAsString(u);
   }
@@ -42,3 +59,4 @@ public class UnifiedEventStep implements TransformStep {
     return om.valueToTree(v);                             // Map/List/etc -> JsonNode
   }
 }
+
