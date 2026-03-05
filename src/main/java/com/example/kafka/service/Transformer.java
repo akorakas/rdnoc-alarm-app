@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Objects;
 
 import com.example.kafka.atlas.UnifiedEventMapper;
+import com.example.kafka.correlate.RedisAlarmInstanceCorrelator;
 import com.example.kafka.service.config.TransformProperties;
 import com.example.kafka.service.errors.BadInputException;
 import com.example.kafka.service.errors.TransformFailureException;
@@ -27,8 +28,12 @@ public class Transformer {
 
   private final List<TransformStep> steps;
 
-  public Transformer(String placeholder, List<TransformProperties.Step> pipeline) {
-    this.steps = buildSteps(placeholder, pipeline);
+  // NEW: keep correlator available when building steps
+  private final RedisAlarmInstanceCorrelator tnmsCorrelator;
+
+  public Transformer(String placeholder, List<TransformProperties.Step> pipeline, RedisAlarmInstanceCorrelator tnmsCorrelator) {
+    this.tnmsCorrelator = tnmsCorrelator;
+    this.steps = buildSteps(placeholder, pipeline, tnmsCorrelator);
   }
 
   public String transform(String inputJson) {
@@ -57,7 +62,7 @@ public class Transformer {
     }
   }
 
-  private static List<TransformStep> buildSteps(String placeholder, List<TransformProperties.Step> pipeline) {
+  private static List<TransformStep> buildSteps(String placeholder, List<TransformProperties.Step> pipeline, RedisAlarmInstanceCorrelator tnmsCorrelator) {
     var out = new ArrayList<TransformStep>();
     if (pipeline == null) return out;
 
@@ -87,7 +92,8 @@ public class Transformer {
         case "flatten"  -> out.add(new FlattenStep(s.getRoots(), s.getIncludeTop(), s.getTarget()));
         case "hash"     -> out.add(new HashStep(s.getAlgorithm(), s.getFields(), s.getTarget()));
         case "neNameEnrich" -> out.add(new NeNameEnrichmentStep());
-        case "unifiedEvent" -> out.add(new UnifiedEventStep(unifiedEventMapper, M));
+        // ✅ changed: pass correlator into UnifiedEventStep
+        case "unifiedEvent" -> out.add(new UnifiedEventStep(unifiedEventMapper, M, tnmsCorrelator));
         case "template" -> out.add(new TemplateStep(s.getTemplate(), s.getTarget()));
         default -> throw new IllegalArgumentException("Unknown step type: " + s.getType());
       }

@@ -40,6 +40,16 @@ app:
       validate-partitions-on-startup: false
       validate-partitions-timeout-sec: 10
 
+  correlation:
+    enabled: true
+    ems-allowlist:
+      - INFINERA_TNMS
+    key-fields:
+      - neName
+      - neEquipment
+      - faultId
+    ttl-days: 7
+
   sync:
     enabled: false
     run-on-startup: false
@@ -73,7 +83,7 @@ spring:
   kafka:
     consumer:
       bootstrap-servers: atlas-dev.tmn.ote.gr:32100
-      group-id: infinera-snmp-traps-01
+      group-id: infinera-snmp-traps-02
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -211,9 +221,11 @@ transform:
 
           - set: type
             expr: >
-              (tnmsAlState == 1) ? 'CLEAR'
-              : (tnmsAlState == 2) ? 'ACKNOWLEDGE'
-              : (tnmsAlState == 3) ? 'UNACKNOWLEDGE'
+              (tnmsSeverityRaw == 0) ? 'CLEAR'
+              : (tnmsSeverityRaw == 1) ? 'FAULT'
+              : (tnmsSeverityRaw == 2) ? 'FAULT'
+              : (tnmsSeverityRaw == 3) ? 'FAULT'
+              : (tnmsSeverityRaw == 4) ? 'FAULT'
               : 'UNKNOWN'
 
           # timestamp in ms (consistent with your Java mapper expectations)
@@ -234,3 +246,4 @@ logging:
     "[org.apache.kafka.common.network]": INFO
     "[org.springframework.kafka]": INFO
     # "[com.example.kafka]": DEBUG
+
