@@ -40,6 +40,23 @@ app:
       validate-partitions-on-startup: false
       validate-partitions-timeout-sec: 10
 
+  correlation:
+    enabled: true
+    redis-prefix: exagrid
+    ems-allowlist:
+      - EXAGRID
+    ttl-days: 7
+    key-parts:
+      - name: name
+        from: sourceEvent
+        jsonPointer: /fields/egEventParamsName
+      - name: device
+        from: sourceEvent
+        jsonPointer: /fields/egEventParamsDeviceName
+      - name: id
+        from: sourceEvent
+        jsonPointer: /fields/egEventParamsId
+
   sync:
     enabled: false
     run-on-startup: false
@@ -52,7 +69,7 @@ app:
   sinks:
     output:
       type: kafka
-      topic: nsp-atnoi-test-prod
+      topic: exagrid-test-rdnoc
      #type: file
      #file: /tmp/out.ndjson
     dlt:
@@ -70,10 +87,15 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
+  data:
+    redis:
+      host: ${REDIS_HOST:redis-tnms}
+      port: ${REDIS_PORT:6379}
+
   kafka:
     consumer:
       bootstrap-servers: atlas-dev.tmn.ote.gr:32100
-      group-id: exagrid-snmp-traps-01
+      group-id: exagrid-snmp-traps-02
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -179,9 +201,6 @@ transform:
             expr: "'UNKNOWN'"
           - set: emsDomain
             expr: "'UNKNOWN'"
-
-          - set: serialNo
-            expr: "egId"
           - set: faultId
             expr: "egName"
           - set: neName
@@ -207,142 +226,21 @@ transform:
       - type: update
         compute:
           - set: type
-            expr: "egSeverityNorm == 'error' || egSeverityNorm == 'critical' || egSeverityNorm == 'warning' || egSeverityNorm == 'major' || egSeverityNorm == 'minor' ? 'FAULT' : 'EVENT'"
+     #       expr: "egSeverityNorm == 'error' || egSeverityNorm == 'critical' || egSeverityNorm == 'warning' || egSeverityNorm == 'major' || egSeverityNorm == 'minor' ? 'FAULT' : 'EVENT'"
+            expr: >
+              (egSeverityNorm == 'clear') ? 'CLEAR'
+              : (egSeverityNorm == 'error') ? 'FAULT'
+              : (egSeverityNorm == 'critical') ? 'FAULT'
+              : (egSeverityNorm == 'warning') ? 'FAULT'
+              : (egSeverityNorm == 'major') ? 'FAULT'
+              : (egSeverityNorm == 'minor') ? 'FAULT'
+              : (egSeverityNorm == 'audit') ? 'EVENT'
+              : (egSeverityNorm == 'info') ? 'EVENT'
+              : 'UNKNOWN'
 
       # 4) Build UnifiedEvent JSON
       - type: unifiedEvent
         target: "$"
-
-      # 0) Get the notification object from the wrapper
-#      - type: extract
-#        failOnMissing: false
-#        failOnBadJson: true
-#        mappings:
-#          notificationFromEnvelope: "/payload/data/ietf-restconf:notification"
-#          notificationFromTopic: "/data/ietf-restconf:notification"
-#          notificationDirect: "/ietf-restconf:notification"
-#          rootDoc: "/"
-#
-#      # 0b) Choose notification from whichever exists
-#      - type: update
-#        compute:
-#          - set: notification
-#            expr: "notificationFromEnvelope != null ? notificationFromEnvelope : (notificationFromTopic != null ? notificationFromTopic : (notificationDirect != null ? notificationDirect : rootDoc))"
-#
-#      # 1) From the notification, pick alarm-change / alarm-delete / alarm-create
-#      - type: extract
-#        fromVar: notification
-#        failOnMissing: false
-#        failOnBadJson: true
-#        mappings:
-#          eventTime: "/eventTime"
-#          alarmChange: "/nsp-fault:alarm-change"
-#          alarmDelete: "/nsp-fault:alarm-delete"
-#          alarmCreate: "/nsp-fault:alarm-create"
-#
-#      # 2) Choose which alarm node we will process; also set sourceEvent to that node
-#      - type: update
-#        compute:
-#          - set: alarmNode
-#            expr: "alarmChange != null ? alarmChange : (alarmCreate != null ? alarmCreate : alarmDelete)"
-#          - set: sourceEvent
-#            expr: "alarmNode"
-#          - set: alarmEventKind
-#            expr: "alarmDelete != null ? 'DELETE' : (alarmCreate != null ? 'CREATE' : (alarmChange != null ? 'CHANGE' : 'UNKNOWN'))"
-#
-#      # 2b) Extract delete objectId if alarm-delete
-#      - type: extract
-#        fromVar: alarmDelete
-#        failOnMissing: false
-#        failOnBadJson: false
-#        mappings:
-#          deleteObjectId: "/objectId"
-#
-#      # 3) Extract fields from alarmNode (common)
-#      - type: extract
-#        fromVar: alarmNode
-#        failOnMissing: false
-#        failOnBadJson: false
-#        mappings:
-#          emsDomain: "/sourceType"
-#          faultId: "/alarmName"
-#          neId: "/neId"
-#          affectedObjectName: "/affectedObjectName"
-#          neName: "/neName"
-#          serialNo: "/objectId"
-#          probableCause: "/probableCause"
-#          alarmType: "/alarmType"
-#          objectFullName: "/objectFullName"
-#
-#      # 4) Optional fields (never fail)
-#      - type: extract
-#        fromVar: alarmNode
-#        failOnMissing: false
-#        failOnBadJson: false
-#        mappings:
-#          severityNew: "severity.new-value"
-#          severityRaw: "/severity"
-#          previousSeverityNew: "previousSeverity.new-value"
-#          previousSeverityRaw: "/previousSeverity"
-#          lastTimeDetectedNew: "lastTimeDetected.new-value"
-#          lastTimeDetectedOld: "lastTimeDetected.old-value"
-#          impact: "/impact"
-#          serviceAffecting: "/serviceAffecting"
-#          fdn: "/fdn"
-#          objectId: "/objectId"
-#          firstTimeDetected: "/firstTimeDetected"
-#          lastTimeDetected: "/lastTimeDetected"
-#          originalSeverity: "/originalSeverity"
-#          sourceSystem: "/sourceSystem"
-#
-#      # 5) Compute normalized fields
-#      - type: update
-#        compute:
-#          - set: severity
-#            expr: "UPPER(COALESCE(severityNew, severityRaw))"
-#          # ✅ Pick a scalar ms timestamp (prefer new-value, then old-value, then scalar)
-#          - set: timestampMs
-#            expr: "COALESCE(lastTimeDetectedNew, lastTimeDetectedOld, lastTimeDetected)"
-#          # ✅ Force lastTimeDetected to be scalar (prevents mapper seeing an object and producing 0)
-#          - set: lastTimeDetected
-#            expr: "timestampMs"
-#
-#          - set: timestamp
-#            expr: "timestampMs"
-#
-#          # ✅ Detect delta presence
-#          - set: hasLastTimeDetectedDelta
-#            expr: "lastTimeDetectedNew != null ? 'true' : (lastTimeDetectedOld != null ? 'true' : 'false')"
-#
-#          # ✅ Your requested logic:
-#          #    - if delta exists -> CHANGE
-#          #    - else if scalar exists -> FAULT
-#          - set: changeType
-#            expr: "hasLastTimeDetectedDelta == 'true' ? 'CHANGE' : (timestampMs != null ? 'FAULT' : 'UNKNOWN')"
-#
-#          - set: type
-#            expr: "alarmEventKind == 'DELETE' ? 'CLEAR' : (alarmEventKind == 'CREATE' ? 'FAULT' : (alarmEventKind == 'CHANGE' ? changeType : 'UNKNOWN'))"
-#
-#          - set: impactSafe
-#            expr: "impact != null ? impact : 0"
-#          - set: serviceAffectingSafe
-#            expr: "serviceAffecting == null ? 'null' : (serviceAffecting == true ? 'true' : 'false')"
-#          - set: prevSeverity
-#            expr: "UPPER(COALESCE(previousSeverityNew, previousSeverityRaw))"
-#          - set: alarmIdentifier
-#            expr: "objectFullName != null ? objectFullName : (faultId != null ? faultId : deleteObjectId)"
-#          - set: faultId
-#            expr: "faultId != null ? faultId : deleteObjectId"
-#          - set: emsDomain
-#            expr: "emsDomain != null ? emsDomain : 'UNKNOWN'"
-#          - set: timestampSec
-#            expr: "timestamp != null ? (timestamp / 1000) : null"
-#
-#      - type: neNameEnrich
-#
-#      # NEW: Build UnifiedEvent (writes final JSON to ctx.rendered / "$")
-#      - type: unifiedEvent
-#        target: "$"
 
 logging:
   level:

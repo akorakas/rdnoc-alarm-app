@@ -42,7 +42,7 @@ public class UnifiedEventStep implements TransformStep {
     // ✅ Redis correlation BEFORE serialization
     if (correlator != null) {
       try {
-        correlator.correlate(u);
+        correlator.correlate(u, seNode);
       } catch (Exception e) {
         log.warn("Redis correlation failed; continuing without correlation", e);
       }
