@@ -32,8 +32,8 @@ public class UnifiedEventMapper {
       DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
   // Choose the zone TNMS uses for that string.
-  // If TNMS timestamps are UTC, change to ZoneId.of("UTC").
-  private static final ZoneId TNMS_ZONE = ZoneId.of("Europe/Athens");
+  // If TNMS timestamps are UTC, change to ZoneId.of("UTC"). "Europe/Athens"
+  private static final ZoneId TNMS_ZONE = ZoneId.of("UTC");
 
   public UnifiedEvent fromContext(TransformContext ctx) {
 
