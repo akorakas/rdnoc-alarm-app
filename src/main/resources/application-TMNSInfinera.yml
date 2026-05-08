@@ -42,20 +42,13 @@ app:
 
   correlation:
     enabled: true
-    redis-prefix: alarm
     ems-allowlist:
       - INFINERA_TNMS
+    key-fields:
+      - neName
+      - neEquipment
+      - faultId
     ttl-days: 7
-    key-parts:
-      - name: neName
-        from: ue
-        field: neName
-      - name: neEquipment
-        from: ue
-        field: neEquipment
-      - name: faultId
-        from: ue
-        field: faultId
 
   sync:
     enabled: false
@@ -86,6 +79,11 @@ spring:
       fail-on-unknown-properties: false
     serialization:
       write-dates-as-timestamps: false
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis-tnms}
+      port: ${REDIS_PORT:6379}
 
   kafka:
     consumer:

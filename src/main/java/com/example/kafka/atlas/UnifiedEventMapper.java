@@ -3,6 +3,7 @@ package com.example.kafka.atlas;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
@@ -35,6 +36,10 @@ public class UnifiedEventMapper {
   // If TNMS timestamps are UTC, change to ZoneId.of("UTC"). "Europe/Athens"
   private static final ZoneId TNMS_ZONE = ZoneId.of("UTC");
 
+  // MV36 raisingTime is SNMP DateAndTime hex (RFC2579 style)
+  // If timezone is not provided in the payload, we assume this default zone.
+  private static final ZoneId MV36_DEFAULT_ZONE = ZoneId.of("Europe/Athens");
+
   public UnifiedEvent fromContext(TransformContext ctx) {
 
     JsonNode sourceEventNode = ctx.get("sourceEvent");
@@ -56,7 +61,7 @@ public class UnifiedEventMapper {
     String alarmIdentifier = clean(ctx.get("alarmIdentifier"));
     String objectFullName = clean(ctx.get("objectFullName"));
 
-    // allow YAML override (EXAGRID / INFINERA_TNMS etc.)
+    // allow YAML override (EXAGRID / INFINERA_TNMS / MV36_MOBILE etc.)
     String sourceEmsRaw = clean(ctx.get("sourceEms"));
     String vendorRaw    = clean(ctx.get("emsVendorID"));
 
@@ -72,18 +77,22 @@ public class UnifiedEventMapper {
     // TELEGRAF FLOWS
     //   - EXAGRID: special field extraction + type classification, severity always UNKNOWN
     //   - INFINERA_TNMS: trust YAML computed fields, but force sourceEvent to TelegrafGenericEvent
+    //   - MV36_MOBILE: field extraction by prefix (dynamic keys), DateAndTime timestamp decode
     // ------------------------------------------------------------------
     boolean isTelegraf = looksLikeTelegraf(sourceEventNode);
     boolean isExaGrid  = sourceEms == EMSId.EXAGRID;
     boolean isTnms     = sourceEms == EMSId.INFINERA_TNMS;
+    boolean isMv36     = sourceEms == EMSId.MV36_MOBILE;
 
-    if (isTelegraf && (isExaGrid || isTnms)) {
+    if (isTelegraf && (isExaGrid || isTnms || isMv36)) {
 
       // Always preserve the raw Telegraf payload as a TelegrafGenericEvent
       ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode));
 
       if (isExaGrid) {
         applyExaGridMapping(ue, sourceEventNode, tsMs, eventTime, typeStr, sevStr);
+      } else if (isMv36) {
+        applyMv36MobileMapping(ue, sourceEventNode, tsMs, eventTime);
       } else {
         // INFINERA_TNMS (and future Telegraf-based non-ExaGrid flows):
         // Use YAML-provided ctx fields for UnifiedEvent properties.
@@ -92,9 +101,8 @@ public class UnifiedEventMapper {
         ue.setSeverity(mapSeverity(sevStr));
 
         // Prefer TNMS alarm timestamp (string) over ctx timestamp
-        Long tnmsMs = null;
         JsonNode f = sourceEventNode != null ? sourceEventNode.get("fields") : null;
-        tnmsMs = tnmsTimestampToMs(getText(f, "enmsAlTimeStamp"));
+        Long tnmsMs = tnmsTimestampToMs(getText(f, "enmsAlTimeStamp"));
         ue.setTimestamp(parseEventTime(firstNonNull(tnmsMs, tsMs), eventTime));
 
         ue.setSerialNo(serialNo);
@@ -234,7 +242,173 @@ public class UnifiedEventMapper {
   }
 
   // ============================================================================================
-  // Helpers
+  // MV36_MOBILE mapping (NEW) - safe additive change, does not affect NSP/EXAGRID/TNMS behavior
+  // ============================================================================================
+
+  private void applyMv36MobileMapping(UnifiedEvent ue,
+                                      JsonNode sourceEventNode,
+                                      Long ctxTsMs,
+                                      String eventTime) {
+
+    JsonNode fields = sourceEventNode != null ? sourceEventNode.get("fields") : null;
+
+    // Keys are dynamic: mv36AlarmStrNeUniqueName.0.<alarmId> etc.
+    String neUniqueName = findFieldTextByPrefix(fields, "mv36AlarmStrNeUniqueName.");
+    String shelf        = findFieldTextByPrefix(fields, "mv36AlarmStrShelf.");
+    String card         = findFieldTextByPrefix(fields, "mv36AlarmStrCard.");
+    String alarmStr     = findFieldTextByPrefix(fields, "mv36AlarmStr.");
+
+    String raisingHex   = findFieldTextByPrefix(fields, "mv36AlarmRaisingTime.");
+    Long mv36TsMs       = mv36DateAndTimeHexToEpochMs(raisingHex);
+
+    Integer sevCode     = findFieldIntByPrefix(fields, "mv36AlarmSeverity.");
+    String serial       = findFieldTextByPrefix(fields, "mv36AlarmId.");
+
+    // Domain/vendor are already set at top; set domain if you want a fixed one here.
+    ue.setEmsDomain(EMSDomain.UNKNOWN);
+
+    // Required mappings
+    ue.setNeName(clean(neUniqueName));
+    ue.setSerialNo(clean(serial));
+    ue.setFaultId(clean(alarmStr));
+
+    // neEquipment = shelf/card
+    String neEquipment = joinNonBlank("/", shelf, card);
+    ue.setNeEquipment(neEquipment != null ? neEquipment : "");
+
+    // alarmIdentifier = ne/shelf/card/alarmStr
+    String identifier = joinNonBlank("/", neUniqueName, shelf, card, alarmStr);
+    // Fallback if we couldn't build a full identifier
+    ue.setAlarmIdentifier(firstNonBlank(identifier, alarmStr, serial));
+
+    // Severity + Type rules from MV36 AlarmSeverity enum
+    ue.setSeverity(mapMv36Severity(sevCode));
+    ue.setType(mapMv36Type(sevCode));
+
+    // Timestamp: prefer mv36 raising time; else ctx timestamp; else eventTime; else now
+    ue.setTimestamp(parseEventTime(firstNonNull(mv36TsMs, ctxTsMs), eventTime));
+  }
+
+  private static Severity mapMv36Severity(Integer code) {
+    if (code == null) return Severity.UNKNOWN;
+    return switch (code) {
+      case 1 -> Severity.CLEARED;
+      case 2 -> Severity.INDETERMINATE;
+      case 3 -> Severity.CRITICAL;
+      case 4 -> Severity.MAJOR;
+      case 5 -> Severity.MINOR;
+      case 6 -> Severity.WARNING;
+      default -> Severity.UNKNOWN; // 0 notApplicable and anything unexpected
+    };
+  }
+
+  private static EventType mapMv36Type(Integer code) {
+    if (code == null) return EventType.UNKNOWN;
+    return switch (code) {
+      case 1 -> EventType.CLEAR;         // cleared
+      case 3, 4, 5, 6 -> EventType.FAULT; // critical/major/minor/warning
+      default -> EventType.UNKNOWN;      // notApplicable(0), indeterminate(2), others
+    };
+  }
+
+  private static String findFieldTextByPrefix(JsonNode fields, String prefix) {
+    if (fields == null || !fields.isObject() || prefix == null) return null;
+    var it = fields.fields();
+    while (it.hasNext()) {
+      var e = it.next();
+      if (e.getKey().startsWith(prefix)) {
+        return (e.getValue() == null || e.getValue().isNull()) ? null : e.getValue().asText();
+      }
+    }
+    return null;
+  }
+
+  private static Integer findFieldIntByPrefix(JsonNode fields, String prefix) {
+    String s = findFieldTextByPrefix(fields, prefix);
+    if (s == null || s.isBlank()) return null;
+    try { return Integer.parseInt(s.trim()); } catch (Exception ignore) { return null; }
+  }
+
+  /** Joins non-blank parts with separator. Skips "--" and trims whitespace. */
+  private static String joinNonBlank(String sep, String... parts) {
+    if (parts == null) return null;
+    StringBuilder sb = new StringBuilder();
+    for (String p : parts) {
+      if (p == null) continue;
+      String t = p.trim();
+      if (t.isEmpty()) continue;
+      if ("--".equals(t)) continue;
+      if (sb.length() > 0) sb.append(sep);
+      sb.append(t);
+    }
+    return sb.length() == 0 ? null : sb.toString();
+  }
+
+  /**
+   * Decode SNMP DateAndTime hex (RFC2579 style) into epoch millis.
+   *
+   * Format (minimum 8 bytes):
+   *   year(2), month, day, hour, minute, second, deciSecond
+   * Optional timezone (3 bytes):
+   *   direction('+'/'-'), hours, minutes
+   *
+   * MV36 special case: undefined raising time is 0000-01-01 00:00:00.0
+   */
+  private static Long mv36DateAndTimeHexToEpochMs(String hex) {
+    if (hex == null || hex.isBlank()) return null;
+
+    try {
+      byte[] b = hexStringToBytes(hex.trim());
+      if (b.length < 8) return null;
+
+      int year  = ((b[0] & 0xFF) << 8) | (b[1] & 0xFF);
+      int month = (b[2] & 0xFF);
+      int day   = (b[3] & 0xFF);
+      int hour  = (b[4] & 0xFF);
+      int min   = (b[5] & 0xFF);
+      int sec   = (b[6] & 0xFF);
+      int deci  = (b[7] & 0xFF); // tenths
+
+      // Undefined per MIB
+      if (year == 0 && month == 1 && day == 1 && hour == 0 && min == 0 && sec == 0 && deci == 0) {
+        return null;
+      }
+
+      ZoneId zone = MV36_DEFAULT_ZONE;
+
+      // timezone bytes present?
+      if (b.length >= 11) {
+        char dir = (char) (b[8] & 0xFF); // '+' or '-'
+        int tzH = (b[9] & 0xFF);
+        int tzM = (b[10] & 0xFF);
+        int totalMin = tzH * 60 + tzM;
+        if (dir == '-') totalMin = -totalMin;
+        zone = ZoneOffset.ofTotalSeconds(totalMin * 60);
+      }
+
+      // deci-seconds -> nanos
+      int nanos = deci * 100_000_000;
+
+      LocalDateTime ldt = LocalDateTime.of(year, month, day, hour, min, sec, nanos);
+      return ldt.atZone(zone).toInstant().toEpochMilli();
+
+    } catch (Exception ignore) {
+      return null;
+    }
+  }
+
+  private static byte[] hexStringToBytes(String s) {
+    int len = s.length();
+    if (len % 2 != 0) throw new IllegalArgumentException("hex length must be even");
+    byte[] out = new byte[len / 2];
+    for (int i = 0; i < len; i += 2) {
+      out[i / 2] = (byte) Integer.parseInt(s.substring(i, i + 2), 16);
+    }
+    return out;
+  }
+
+  // ============================================================================================
+  // Helpers (existing)
   // ============================================================================================
 
   private static TelegrafGenericEvent toTelegrafGenericEvent(JsonNode sourceEventNode) {
