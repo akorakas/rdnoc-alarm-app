@@ -19,5 +19,6 @@ public enum EMSVendorID {
     UNKNOWN,
     NSP,
     NETACT,
-    TNMS
+    TNMS,
+    MV_36
 }
