@@ -6,6 +6,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.slf4j.Logger;
@@ -86,13 +87,16 @@ public class UnifiedEventMapper {
 
     if (isTelegraf && (isExaGrid || isTnms || isMv36)) {
 
-      // Always preserve the raw Telegraf payload as a TelegrafGenericEvent
-      ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode));
+      // ✅ Preserve raw Telegraf payload as TelegrafGenericEvent
+      // ✅ BUT: for MV36 only, trim all field keys from first '.' onward
+      ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode, isMv36));
 
       if (isExaGrid) {
         applyExaGridMapping(ue, sourceEventNode, tsMs, eventTime, typeStr, sevStr);
+
       } else if (isMv36) {
         applyMv36MobileMapping(ue, sourceEventNode, tsMs, eventTime, emsDomainRaw);
+
       } else {
         // INFINERA_TNMS (and future Telegraf-based non-ExaGrid flows):
         // Use YAML-provided ctx fields for UnifiedEvent properties.
@@ -109,7 +113,7 @@ public class UnifiedEventMapper {
         ue.setFaultId(faultId);
         ue.setNeName(neName);
 
-        // ✅ Fallback: build neName from Telegraf fields if YAML didn't populate it
+        // Fallback: build neName from Telegraf fields if YAML didn't populate it
         if (ue.getNeName() == null) {
           String a = getText(f, "enmsTrapNeIdName");
           String b = getText(f, "enmsNeName");
@@ -242,7 +246,7 @@ public class UnifiedEventMapper {
   }
 
   // ============================================================================================
-  // MV36_MOBILE mapping (NEW) - safe additive change, does not affect NSP/EXAGRID/TNMS behavior
+  // MV36_MOBILE mapping
   // ============================================================================================
 
   private void applyMv36MobileMapping(UnifiedEvent ue,
@@ -257,6 +261,7 @@ public class UnifiedEventMapper {
     String neUniqueName = findFieldTextByPrefix(fields, "mv36AlarmStrNeUniqueName.");
     String shelf        = findFieldTextByPrefix(fields, "mv36AlarmStrShelf.");
     String card         = findFieldTextByPrefix(fields, "mv36AlarmStrCard.");
+    String portId       = findFieldTextByPrefix(fields, "mv36AlarmPortId.");
     String alarmStr     = findFieldTextByPrefix(fields, "mv36AlarmStr.");
 
     String raisingHex   = findFieldTextByPrefix(fields, "mv36AlarmRaisingTime.");
@@ -265,7 +270,6 @@ public class UnifiedEventMapper {
     Integer sevCode     = findFieldIntByPrefix(fields, "mv36AlarmSeverity.");
     String serial       = findFieldTextByPrefix(fields, "mv36AlarmId.");
 
-    // Domain/vendor are already set at top; set domain if you want a fixed one here.
     ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
 
     // Required mappings
@@ -273,20 +277,17 @@ public class UnifiedEventMapper {
     ue.setSerialNo(clean(serial));
     ue.setFaultId(clean(alarmStr));
 
-    // neEquipment = shelf/card
-    String neEquipment = joinNonBlank("/", shelf, card);
+    // neEquipment = shelf/card/portId
+    String neEquipment = joinNonBlank("/", shelf, card, portId);
     ue.setNeEquipment(neEquipment != null ? neEquipment : "");
 
-    // alarmIdentifier = ne/shelf/card/alarmStr
-    String identifier = joinNonBlank("/", neUniqueName, shelf, card, alarmStr);
-    // Fallback if we couldn't build a full identifier
+    // alarmIdentifier = ne/shelf/card/portId/alarmStr
+    String identifier = joinNonBlank("/", neUniqueName, shelf, card, portId, alarmStr);
     ue.setAlarmIdentifier(firstNonBlank(identifier, alarmStr, serial));
 
-    // Severity + Type rules from MV36 AlarmSeverity enum
     ue.setSeverity(mapMv36Severity(sevCode));
     ue.setType(mapMv36Type(sevCode));
 
-    // Timestamp: prefer mv36 raising time; else ctx timestamp; else eventTime; else now
     ue.setTimestamp(parseEventTime(firstNonNull(mv36TsMs, ctxTsMs), eventTime));
   }
 
@@ -306,9 +307,9 @@ public class UnifiedEventMapper {
   private static EventType mapMv36Type(Integer code) {
     if (code == null) return EventType.UNKNOWN;
     return switch (code) {
-      case 1 -> EventType.CLEAR;         // cleared
+      case 1 -> EventType.CLEAR;          // cleared
       case 3, 4, 5, 6 -> EventType.FAULT; // critical/major/minor/warning
-      default -> EventType.UNKNOWN;      // notApplicable(0), indeterminate(2), others
+      default -> EventType.UNKNOWN;       // notApplicable(0), indeterminate(2), others
     };
   }
 
@@ -409,18 +410,47 @@ public class UnifiedEventMapper {
   }
 
   // ============================================================================================
-  // Helpers (existing)
+  // Helpers (existing) + MV36 field-key trim
   // ============================================================================================
 
-  private static TelegrafGenericEvent toTelegrafGenericEvent(JsonNode sourceEventNode) {
+  /**
+   * Build TelegrafGenericEvent from Telegraf JSON.
+   * If trimFieldKeysFromDot=true, field keys are rewritten to everything before the first '.'.
+   * This is applied ONLY for MV36_MOBILE to avoid affecting other flows.
+   */
+  private static TelegrafGenericEvent toTelegrafGenericEvent(JsonNode sourceEventNode, boolean trimFieldKeysFromDot) {
     TelegrafGenericEvent t = new TelegrafGenericEvent();
     if (sourceEventNode == null) return t;
 
-    t.setFields(asStringMap(sourceEventNode.get("fields")));
+    Map<String, String> fields = asStringMap(sourceEventNode.get("fields"));
+    if (trimFieldKeysFromDot && fields != null && !fields.isEmpty()) {
+      fields = trimKeysFromFirstDot(fields);
+    }
+
+    t.setFields(fields);
     t.setTags(asStringMap(sourceEventNode.get("tags")));
     // telegraf "timestamp" is usually seconds
     t.setTimestamp(toEpochSecondsLong(sourceEventNode.get("timestamp")));
     return t;
+  }
+
+  /**
+   * Rewrites map keys to substring before first '.'.
+   * If multiple original keys collide after trimming, we keep the first value and ignore the rest.
+   */
+  private static Map<String, String> trimKeysFromFirstDot(Map<String, String> in) {
+    Map<String, String> out = new LinkedHashMap<>();
+    for (Map.Entry<String, String> e : in.entrySet()) {
+      String k = e.getKey();
+      if (k == null) continue;
+
+      int dot = k.indexOf('.');
+      String nk = (dot > 0) ? k.substring(0, dot) : k;
+
+      // keep first on collision
+      out.putIfAbsent(nk, e.getValue());
+    }
+    return out;
   }
 
   private static String normalize(String v) {
