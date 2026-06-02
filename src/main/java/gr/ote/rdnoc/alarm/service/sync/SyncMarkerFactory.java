@@ -22,34 +22,49 @@ public class SyncMarkerFactory {
 
   private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
 
-  public String buildSyncStart() { return build(EventType.SYNC_START); }
-  public String buildSyncEnd()   { return build(EventType.SYNC_END); }
+  /**
+   * Backward-compatible NSP marker methods.
+   */
+  public String buildSyncStart() {
+    return buildSyncStart(EMSId.NSP_ATNOI, EMSVendorID.NSP, EMSDomain.UNKNOWN);
+  }
 
-  private String build(EventType type) {
+  public String buildSyncEnd() {
+    return buildSyncEnd(EMSId.NSP_ATNOI, EMSVendorID.NSP, EMSDomain.UNKNOWN);
+  }
+
+  /**
+   * Source-aware marker methods.
+   */
+  public String buildSyncStart(EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
+    return build(EventType.SYNC_START, sourceEms, vendor, domain);
+  }
+
+  public String buildSyncEnd(EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
+    return build(EventType.SYNC_END, sourceEms, vendor, domain);
+  }
+
+  private String build(EventType type, EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
     try {
       UnifiedEvent u = new UnifiedEvent();
 
-      // Stable identity
-      u.setSourceEms(EMSId.NSP_ATNOI);
-      u.setEmsVendorID(EMSVendorID.NSP);
-      u.setEmsDomain(EMSDomain.UNKNOWN);
+      u.setSourceEms(sourceEms);
+      u.setEmsVendorID(vendor);
+      u.setEmsDomain(domain);
 
-      // Marker type + timestamp
       u.setType(type);
       u.setSeverity(Severity.UNKNOWN);
       u.setTimestamp(Instant.now());
 
-      // Keep required strings non-null (safer for downstream)
       u.setSerialNo("");
       u.setFaultId("");
       u.setNeName("");
       u.setNeEquipment("");
-      u.setAlarmIdentifier(type.name());
+      u.setAlarmIdentifier(sourceEms.name() + "_" + type.name());
 
-      // Put an object as sourceEvent (so JSON has "sourceEvent": {...})
       NokiaAtnoiAlarm se = new NokiaAtnoiAlarm();
       se.setEventType(type);
-      se.setObjectIdentifier(type.name());
+      se.setObjectIdentifier(sourceEms.name() + "_" + type.name());
       se.setAdditionalText("SYNC_MARKER");
       se.setAlarmName(type.name());
       se.setNeId("");
@@ -57,16 +72,16 @@ public class SyncMarkerFactory {
 
       u.setSourceEvent(se);
 
-      // Optional metadata (handy for filtering/debug)
       u.setMetadata(Map.of(
           "source", "SYNC",
+          "sourceEms", sourceEms.name(),
           "markerType", type.name()
       ));
 
       return M.writeValueAsString(u);
 
     } catch (Exception e) {
-      throw new RuntimeException("Failed to build sync marker " + type, e);
+      throw new RuntimeException("Failed to build sync marker " + type + " for " + sourceEms, e);
     }
   }
 }
