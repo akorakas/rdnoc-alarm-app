@@ -12,7 +12,6 @@ import java.util.Map;
 
 import org.snmp4j.CommunityTarget;
 import org.snmp4j.PDU;
-import org.snmp4j.ScopedPDU;
 import org.snmp4j.Snmp;
 import org.snmp4j.Target;
 import org.snmp4j.event.ResponseEvent;
@@ -181,7 +180,6 @@ public class Mv36SnmpClient {
     }
   }
 
-  @SuppressWarnings("unchecked")
   private Target<UdpAddress> buildTarget() {
     String address = "udp:" + props.getSnmp().getHost() + "/" + props.getSnmp().getPort();
 
