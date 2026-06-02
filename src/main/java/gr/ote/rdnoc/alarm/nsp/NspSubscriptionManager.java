@@ -97,6 +97,9 @@ public class NspSubscriptionManager {
       Optional<NspSubscriptionState> existing = stateStore.load();
       if (existing.isPresent()) {
         NspSubscriptionState st = existing.get();
+        if (st.host() != null && !st.host().isBlank()) {
+          nspClient.forceActiveHost(st.host());
+        }
         TopicStatus status = checkTopic(st.topicId());
 
         if (status == TopicStatus.MISSING) {
@@ -178,7 +181,7 @@ public class NspSubscriptionManager {
           return null;
         }
 
-        nspClient.renewSubscription(state.subscriptionId());
+        nspClient.renewSubscription(state.subscriptionId(), state.host());
         log.info("Renewed subscription {}", state.subscriptionId());
         return null;
       });
@@ -199,13 +202,23 @@ public class NspSubscriptionManager {
 
   private NspSubscriptionState ensureSubscription() throws Exception {
     Optional<NspSubscriptionState> existing = stateStore.load();
-    if (existing.isPresent()) return existing.get();
+    if (existing.isPresent()) {
+      NspSubscriptionState st = existing.get();
+
+      if (st.host() != null && !st.host().isBlank()) {
+        nspClient.forceActiveHost(st.host());
+      }
+
+      return st;
+    }
 
     var info = nspClient.createSubscription();
-    var state = new NspSubscriptionState(info.subscriptionId(), info.topicId());
+    var state = new NspSubscriptionState(info.subscriptionId(), info.topicId(), info.host());
     stateStore.save(state);
 
-    log.info("Created subscriptionId={}, topicId={}", state.subscriptionId(), state.topicId());
+    log.info("Created subscriptionId={}, topicId={}, host={}",
+        state.subscriptionId(), state.topicId(), state.host());
+
     return state;
   }
 
