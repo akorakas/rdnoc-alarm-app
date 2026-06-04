@@ -14,6 +14,12 @@ import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
+import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
+
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
 import gr.ote.atlas.events.enums.EMSDomain;
@@ -25,7 +31,21 @@ import gr.ote.atlas.events.models.EnrichedData;
 import gr.ote.atlas.events.models.UnifiedEvent;
 import gr.ote.rdnoc.alarm.service.pipeline.TransformContext;
 
+@Component
 public class UnifiedEventMapper {
+
+  private final Mv36NeEnrichmentService mv36NeEnrichmentService;
+
+  @Autowired
+  public UnifiedEventMapper(
+      org.springframework.beans.factory.ObjectProvider<Mv36NeEnrichmentService> enrichmentProvider
+  ) {
+    this.mv36NeEnrichmentService = enrichmentProvider.getIfAvailable();
+  }
+
+public UnifiedEventMapper() {
+  this.mv36NeEnrichmentService = null;
+}
 
   private static final Logger log = LoggerFactory.getLogger(UnifiedEventMapper.class);
 
@@ -263,6 +283,34 @@ public class UnifiedEventMapper {
     String card         = findFieldTextByPrefix(fields, "mv36AlarmStrCard.");
     String portId       = findFieldTextByPrefix(fields, "mv36AlarmPortId.");
     String alarmStr     = findFieldTextByPrefix(fields, "mv36AlarmStr.");
+    String alarmNeId = findFieldTextByPrefix(fields, "mv36AlarmNeId.");
+
+    String mv36NeName = null;
+    String mv36NeTypeStr = null;
+    String mv36NeUniqueName = null;
+    String mv36NeId = null;
+
+    if (mv36NeEnrichmentService != null) {
+      var neOpt = mv36NeEnrichmentService.findByAlarmNeId(alarmNeId);
+
+      if (neOpt.isEmpty() && neUniqueName != null && !neUniqueName.isBlank()) {
+        neOpt = mv36NeEnrichmentService.findByUniqueName(neUniqueName);
+      }
+
+      if (neOpt.isPresent()) {
+        Mv36NetworkElement ne = neOpt.get();
+        mv36NeId = clean(ne.getMv36NeId());
+        mv36NeName = clean(ne.getMv36NeName());
+        mv36NeUniqueName = clean(ne.getMv36NeUniqueName());
+        mv36NeTypeStr = clean(ne.getMv36NeTypeStr());
+      }
+    }
+
+    String effectiveNeName = firstNonBlank(
+        mv36NeName,
+        neUniqueName,
+        alarmNeId
+    );
 
     String raisingHex   = findFieldTextByPrefix(fields, "mv36AlarmRaisingTime.");
     Long mv36TsMs       = mv36DateAndTimeHexToEpochMs(raisingHex);
@@ -273,7 +321,7 @@ public class UnifiedEventMapper {
     ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
 
     // Required mappings
-    ue.setNeName(clean(neUniqueName));
+    ue.setNeName(clean(effectiveNeName));
     ue.setSerialNo(clean(serial));
     ue.setFaultId(clean(alarmStr));
 
@@ -282,11 +330,20 @@ public class UnifiedEventMapper {
     ue.setNeEquipment(neEquipment != null ? neEquipment : "");
 
     // alarmIdentifier = ne/shelf/card/portId/alarmStr
-    String identifier = joinNonBlank("/", neUniqueName, shelf, card, portId, alarmStr);
+    String identifier = joinNonBlank("/", effectiveNeName, shelf, card, portId, alarmStr);
     ue.setAlarmIdentifier(firstNonBlank(identifier, alarmStr, serial));
 
     ue.setSeverity(mapMv36Severity(sevCode));
     ue.setType(mapMv36Type(sevCode));
+
+    if (ue.getSourceEvent() instanceof TelegrafGenericEvent t && t.getFields() != null) {
+      Map<String, String> srcFields = t.getFields();
+
+      if (mv36NeId != null) srcFields.put("mv36NeId", mv36NeId);
+      if (mv36NeName != null) srcFields.put("mv36NeName", mv36NeName);
+      if (mv36NeUniqueName != null) srcFields.put("mv36NeUniqueName", mv36NeUniqueName);
+      if (mv36NeTypeStr != null) srcFields.put("mv36NeTypeStr", mv36NeTypeStr);
+    }
 
     ue.setTimestamp(parseEventTime(firstNonNull(mv36TsMs, ctxTsMs), eventTime));
   }

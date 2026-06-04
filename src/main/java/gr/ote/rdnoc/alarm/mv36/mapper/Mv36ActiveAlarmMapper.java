@@ -5,6 +5,11 @@ import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import java.util.Optional;
+
+import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
+import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
+
 import org.springframework.stereotype.Component;
 
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
@@ -23,6 +28,7 @@ import lombok.RequiredArgsConstructor;
 public class Mv36ActiveAlarmMapper {
 
   private final Mv36SnmpProperties props;
+  private final org.springframework.beans.factory.ObjectProvider<Mv36NeEnrichmentService> neEnrichmentServiceProvider;
 
   public UnifiedEvent toUnifiedEvent(Mv36ActiveAlarm alarm) {
     UnifiedEvent ue = new UnifiedEvent();
@@ -45,7 +51,25 @@ public class Mv36ActiveAlarmMapper {
         EMSDomain.TRANSPORT
     );
 
-    String neName = clean(alarm.getMv36AlarmStrNeUniqueName());
+    Mv36NeEnrichmentService neEnrichmentService = neEnrichmentServiceProvider.getIfAvailable();
+
+    Optional<Mv36NetworkElement> neOpt = neEnrichmentService != null
+      ? neEnrichmentService.findForAlarm(alarm)
+      : Optional.empty();
+
+    Mv36NetworkElement ne = neOpt.orElse(null);
+
+    String mv36NeName = ne != null ? clean(ne.getMv36NeName()) : null;
+    String mv36NeTypeStr = ne != null ? clean(ne.getMv36NeTypeStr()) : null;
+    String mv36NeUniqueName = ne != null ? clean(ne.getMv36NeUniqueName()) : null;
+    String mv36NeId = ne != null ? clean(ne.getMv36NeId()) : null;
+
+    String neName = firstNonBlank(
+      mv36NeName,
+      clean(alarm.getMv36AlarmStrNeUniqueName()),
+      clean(alarm.getMv36AlarmNeId())
+    );
+
     String shelf = clean(alarm.getMv36AlarmStrShelf());
     String card = clean(alarm.getMv36AlarmStrCard());
     String port = clean(alarm.getMv36AlarmPortId());
@@ -68,8 +92,20 @@ public class Mv36ActiveAlarmMapper {
     ue.setNeEquipment(neEquipment != null ? neEquipment : "");
     ue.setAlarmIdentifier(firstNonBlank(identifier, faultId, alarm.getMv36AlarmId()));
 
+    Map<String, String> sourceFields = alarm.toFieldMap();
+
+    if (mv36NeId != null) sourceFields.put("mv36NeId", mv36NeId);
+    if (mv36NeName != null) sourceFields.put("mv36NeName", mv36NeName);
+    if (mv36NeUniqueName != null) sourceFields.put("mv36NeUniqueName", mv36NeUniqueName);
+    if (mv36NeTypeStr != null) sourceFields.put("mv36NeTypeStr", mv36NeTypeStr);
+
+    // In case enrichment service finds by fallback internally in future
+    if (neEnrichmentService != null) {
+      neEnrichmentService.enrichFields(sourceFields);
+    }
+
     TelegrafGenericEvent sourceEvent = new TelegrafGenericEvent();
-    sourceEvent.setFields(alarm.toFieldMap());
+    sourceEvent.setFields(sourceFields);
     sourceEvent.setTags(Map.of(
         "source", "MV36_SNMP_SYNC",
         "sourceEms", sourceEms.name()
@@ -86,6 +122,10 @@ public class Mv36ActiveAlarmMapper {
     metadata.put("mv36AlarmEventType", alarm.getMv36AlarmEventType());
     metadata.put("mv36AlarmStrProbCause", alarm.getMv36AlarmStrProbCause());
     metadata.put("mv36AlarmStrEventType", alarm.getMv36AlarmStrEventType());
+    metadata.put("mv36NeId", mv36NeId);
+    metadata.put("mv36NeName", mv36NeName);
+    metadata.put("mv36NeUniqueName", mv36NeUniqueName);
+    metadata.put("mv36NeTypeStr", mv36NeTypeStr);
 
     ue.setMetadata(metadata);
 
