@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import gr.ote.rdnoc.alarm.atlas.UnifiedEventMapper;
 import gr.ote.rdnoc.alarm.correlate.RedisAlarmInstanceCorrelator;
 import gr.ote.rdnoc.alarm.service.config.TransformProperties;
@@ -19,33 +21,27 @@ import gr.ote.rdnoc.alarm.service.pipeline.steps.RegexExtractStep;
 import gr.ote.rdnoc.alarm.service.pipeline.steps.TemplateStep;
 import gr.ote.rdnoc.alarm.service.pipeline.steps.UnifiedEventStep;
 import gr.ote.rdnoc.alarm.service.pipeline.steps.UpdateStep;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class Transformer {
 
   private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
-  private static final UnifiedEventMapper unifiedEventMapper = new UnifiedEventMapper();
 
+  private final UnifiedEventMapper unifiedEventMapper;
   private final List<TransformStep> steps;
-
-  // NEW: keep correlator available when building steps
-//  private final RedisAlarmInstanceCorrelator tnmsCorrelator;
-
-//  public Transformer(String placeholder, List<TransformProperties.Step> pipeline, RedisAlarmInstanceCorrelator tnmsCorrelator) {
-//    this.tnmsCorrelator = tnmsCorrelator;
-//    this.steps = buildSteps(placeholder, pipeline, tnmsCorrelator);
-//  }
 
   public Transformer(String placeholder,
                      List<TransformProperties.Step> pipeline,
-                     RedisAlarmInstanceCorrelator tnmsCorrelator) {
-    this.steps = buildSteps(placeholder, pipeline, tnmsCorrelator);
+                     RedisAlarmInstanceCorrelator tnmsCorrelator,
+                     UnifiedEventMapper unifiedEventMapper) {
+
+    this.unifiedEventMapper = unifiedEventMapper;
+    this.steps = buildSteps(placeholder, pipeline, tnmsCorrelator, unifiedEventMapper);
   }
 
   public String transform(String inputJson) {
     try {
       var root = M.readTree(inputJson);
-      var ctx  = new TransformContext(root);
+      var ctx = new TransformContext(root);
 
       for (var s : steps) {
         try {
@@ -68,9 +64,16 @@ public class Transformer {
     }
   }
 
-  private static List<TransformStep> buildSteps(String placeholder, List<TransformProperties.Step> pipeline, RedisAlarmInstanceCorrelator tnmsCorrelator) {
+  private static List<TransformStep> buildSteps(String placeholder,
+                                                List<TransformProperties.Step> pipeline,
+                                                RedisAlarmInstanceCorrelator tnmsCorrelator,
+                                                UnifiedEventMapper unifiedEventMapper) {
+
     var out = new ArrayList<TransformStep>();
-    if (pipeline == null) return out;
+
+    if (pipeline == null) {
+      return out;
+    }
 
     for (var s : pipeline) {
       switch (s.getType()) {
@@ -80,11 +83,13 @@ public class Transformer {
             Boolean.TRUE.equals(s.getFailOnMissing()),
             Boolean.TRUE.equals(s.getFailOnBadJson())
         ));
+
         case "update" -> out.add(new UpdateStep(
             s.getStripCr(),
             s.getCompute(),
             placeholder
         ));
+
         case "regexExtract" -> {
           final int grp = Objects.requireNonNullElse(s.getGroup(), 1);
           out.add(new RegexExtractStep(
@@ -95,12 +100,32 @@ public class Transformer {
               s.getFallback()
           ));
         }
-        case "flatten"  -> out.add(new FlattenStep(s.getRoots(), s.getIncludeTop(), s.getTarget()));
-        case "hash"     -> out.add(new HashStep(s.getAlgorithm(), s.getFields(), s.getTarget()));
+
+        case "flatten" -> out.add(new FlattenStep(
+            s.getRoots(),
+            s.getIncludeTop(),
+            s.getTarget()
+        ));
+
+        case "hash" -> out.add(new HashStep(
+            s.getAlgorithm(),
+            s.getFields(),
+            s.getTarget()
+        ));
+
         case "neNameEnrich" -> out.add(new NeNameEnrichmentStep());
-        // ✅ changed: pass correlator into UnifiedEventStep
-        case "unifiedEvent" -> out.add(new UnifiedEventStep(unifiedEventMapper, M, tnmsCorrelator));
-        case "template" -> out.add(new TemplateStep(s.getTemplate(), s.getTarget()));
+
+        case "unifiedEvent" -> out.add(new UnifiedEventStep(
+            unifiedEventMapper,
+            M,
+            tnmsCorrelator
+        ));
+
+        case "template" -> out.add(new TemplateStep(
+            s.getTemplate(),
+            s.getTarget()
+        ));
+
         default -> throw new IllegalArgumentException("Unknown step type: " + s.getType());
       }
     }
