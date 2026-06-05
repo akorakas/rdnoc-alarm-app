@@ -7,6 +7,7 @@ import java.util.Map;
 import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 
 import gr.ote.atlas.events.models.UnifiedEvent;
 import gr.ote.rdnoc.alarm.mv36.mapper.Mv36ActiveAlarmMapper;
@@ -24,7 +25,10 @@ public class Mv36SnmpPoller {
   private final Mv36SnmpClient snmpClient;
   private final Mv36ActiveAlarmMapper mapper;
   private final SinkRouter sinks;
-  private final ObjectMapper objectMapper;
+
+  private static final ObjectMapper EVENT_OBJECT_MAPPER = new ObjectMapper()
+      .findAndRegisterModules()
+      .configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, true);
 
   public void fetchAndPublishActiveAlarmsOnce() throws Exception {
     Map<String, String> headers = new HashMap<>();
@@ -41,7 +45,7 @@ public class Mv36SnmpPoller {
     for (Mv36ActiveAlarm alarm : alarms) {
       try {
         UnifiedEvent event = mapper.toUnifiedEvent(alarm);
-        String json = objectMapper.writeValueAsString(event);
+        String json = EVENT_OBJECT_MAPPER.writeValueAsString(event);
 
         String key = event.getAlarmIdentifier();
         sinks.sendOutput(key, json, headers);
