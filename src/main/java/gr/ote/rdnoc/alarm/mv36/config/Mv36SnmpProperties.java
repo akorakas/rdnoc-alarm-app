@@ -28,38 +28,58 @@ public class Mv36SnmpProperties {
 
   public static class Sync {
     private boolean enabled = false;
+  
+    private boolean runOnStartup = false;
+    private boolean startListenerAfterStartupSync = false;
+  
     private long fixedDelayMs = 7_200_000L;
     private long initialDelayMs = 120_000L;
     private String kafkaListenerId = "alarm-input-listener";
-
+  
     public boolean isEnabled() {
       return enabled;
     }
-
+  
     public void setEnabled(boolean enabled) {
       this.enabled = enabled;
     }
-
+  
+    public boolean isRunOnStartup() {
+      return runOnStartup;
+    }
+  
+    public void setRunOnStartup(boolean runOnStartup) {
+      this.runOnStartup = runOnStartup;
+    }
+  
+    public boolean isStartListenerAfterStartupSync() {
+      return startListenerAfterStartupSync;
+    }
+  
+    public void setStartListenerAfterStartupSync(boolean startListenerAfterStartupSync) {
+      this.startListenerAfterStartupSync = startListenerAfterStartupSync;
+    }
+  
     public long getFixedDelayMs() {
       return fixedDelayMs;
     }
-
+  
     public void setFixedDelayMs(long fixedDelayMs) {
       this.fixedDelayMs = fixedDelayMs;
     }
-
+  
     public long getInitialDelayMs() {
       return initialDelayMs;
     }
-
+  
     public void setInitialDelayMs(long initialDelayMs) {
       this.initialDelayMs = initialDelayMs;
     }
-
+  
     public String getKafkaListenerId() {
       return kafkaListenerId;
     }
-
+  
     public void setKafkaListenerId(String kafkaListenerId) {
       this.kafkaListenerId = kafkaListenerId;
     }
