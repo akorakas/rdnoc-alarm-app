@@ -4,13 +4,11 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
-
 import java.util.Optional;
 
-import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
-import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
-
 import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
 import gr.ote.atlas.events.enums.EMSDomain;
@@ -18,14 +16,19 @@ import gr.ote.atlas.events.enums.EMSId;
 import gr.ote.atlas.events.enums.EMSVendorID;
 import gr.ote.atlas.events.enums.EventType;
 import gr.ote.atlas.events.enums.Severity;
+import gr.ote.atlas.events.models.EnrichedData;
 import gr.ote.atlas.events.models.UnifiedEvent;
 import gr.ote.rdnoc.alarm.mv36.config.Mv36SnmpProperties;
+import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
 import gr.ote.rdnoc.alarm.mv36.model.Mv36ActiveAlarm;
+import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
 import lombok.RequiredArgsConstructor;
 
 @Component
 @RequiredArgsConstructor
 public class Mv36ActiveAlarmMapper {
+
+  private static final ObjectMapper ENRICHED_DATA_MAPPER = new ObjectMapper().findAndRegisterModules();
 
   private final Mv36SnmpProperties props;
   private final org.springframework.beans.factory.ObjectProvider<Mv36NeEnrichmentService> neEnrichmentServiceProvider;
@@ -54,8 +57,8 @@ public class Mv36ActiveAlarmMapper {
     Mv36NeEnrichmentService neEnrichmentService = neEnrichmentServiceProvider.getIfAvailable();
 
     Optional<Mv36NetworkElement> neOpt = neEnrichmentService != null
-      ? neEnrichmentService.findForAlarm(alarm)
-      : Optional.empty();
+        ? neEnrichmentService.findForAlarm(alarm)
+        : Optional.empty();
 
     Mv36NetworkElement ne = neOpt.orElse(null);
 
@@ -65,9 +68,9 @@ public class Mv36ActiveAlarmMapper {
     String mv36NeId = ne != null ? clean(ne.getMv36NeId()) : null;
 
     String neName = firstNonBlank(
-      mv36NeName,
-      clean(alarm.getMv36AlarmStrNeUniqueName()),
-      clean(alarm.getMv36AlarmNeId())
+        mv36NeName,
+        clean(alarm.getMv36AlarmStrNeUniqueName()),
+        clean(alarm.getMv36AlarmNeId())
     );
 
     String shelf = clean(alarm.getMv36AlarmStrShelf());
@@ -91,6 +94,10 @@ public class Mv36ActiveAlarmMapper {
     ue.setNeName(neName);
     ue.setNeEquipment(neEquipment != null ? neEquipment : "");
     ue.setAlarmIdentifier(firstNonBlank(identifier, faultId, alarm.getMv36AlarmId()));
+
+    // MV36 location enrichment:
+    // mv36NeName = 0057-61 MEGAOTE -> affectedLocation.name = 0057
+    ue.setEnrichedData(buildMv36EnrichedData(neName));
 
     Map<String, String> sourceFields = alarm.toFieldMap();
 
@@ -130,6 +137,50 @@ public class Mv36ActiveAlarmMapper {
     ue.setMetadata(metadata);
 
     return ue;
+  }
+
+  private static EnrichedData buildMv36EnrichedData(String neName) {
+    String locationName = extractLocationNameFromMv36NeName(neName);
+
+    if (locationName == null) {
+      return null;
+    }
+
+    Map<String, Object> affectedLocation = new LinkedHashMap<>();
+    affectedLocation.put("inventoryId", null);
+    affectedLocation.put("name", locationName);
+    affectedLocation.put("longitude", null);
+    affectedLocation.put("latitude", null);
+
+    Map<String, Object> root = new LinkedHashMap<>();
+    root.put("affectedLocation", affectedLocation);
+    root.put("transport", null);
+    root.put("affectedSite", null);
+    root.put("affectedController", null);
+    root.put("affectedCell", null);
+    root.put("affectedCellId", null);
+    root.put("affectedTechnologies", null);
+    root.put("probableCause", null);
+
+    return ENRICHED_DATA_MAPPER.convertValue(root, EnrichedData.class);
+  }
+
+  private static String extractLocationNameFromMv36NeName(String neName) {
+    String s = clean(neName);
+
+    if (s == null) {
+      return null;
+    }
+
+    int dash = s.indexOf('-');
+
+    if (dash <= 0) {
+      return null;
+    }
+
+    String location = s.substring(0, dash).trim();
+
+    return location.isEmpty() ? null : location;
   }
 
   private static Instant parseRaisingTime(String value) {

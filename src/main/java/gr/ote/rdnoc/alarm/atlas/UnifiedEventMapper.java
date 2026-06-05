@@ -15,6 +15,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
@@ -33,6 +34,8 @@ import gr.ote.rdnoc.alarm.service.pipeline.TransformContext;
 public class UnifiedEventMapper {
 
   private static final Logger log = LoggerFactory.getLogger(UnifiedEventMapper.class);
+
+  private static final ObjectMapper ENRICHED_DATA_MAPPER = new ObjectMapper().findAndRegisterModules();
 
   private final Mv36NeEnrichmentService mv36NeEnrichmentService;
 
@@ -189,7 +192,8 @@ public class UnifiedEventMapper {
       ue.setSourceEvent(n);
     }
 
-    // enrichedData
+    // enrichedData from context can override only if present.
+    // For MV36 Kafka, ctx.enrichedData is normally null, so MV36 enrichedData remains.
     Object edObj = ctx.get("enrichedData");
     if (edObj instanceof EnrichedData ed) {
       ue.setEnrichedData(ed);
@@ -332,6 +336,10 @@ public class UnifiedEventMapper {
     String identifier = joinNonBlank("/", effectiveNeName, shelf, card, portId, alarmStr);
     ue.setAlarmIdentifier(firstNonBlank(identifier, alarmStr, serial));
 
+    // MV36 location enrichment:
+    // effectiveNeName = 0057-61 MEGAOTE -> affectedLocation.name = 0057
+    ue.setEnrichedData(buildMv36EnrichedData(effectiveNeName));
+
     ue.setSeverity(mapMv36Severity(sevCode));
     ue.setType(mapMv36Type(sevCode));
 
@@ -345,6 +353,50 @@ public class UnifiedEventMapper {
     }
 
     ue.setTimestamp(parseEventTime(firstNonNull(mv36TsMs, ctxTsMs), eventTime));
+  }
+
+  private static EnrichedData buildMv36EnrichedData(String neName) {
+    String locationName = extractLocationNameFromMv36NeName(neName);
+
+    if (locationName == null) {
+      return null;
+    }
+
+    Map<String, Object> affectedLocation = new LinkedHashMap<>();
+    affectedLocation.put("inventoryId", null);
+    affectedLocation.put("name", locationName);
+    affectedLocation.put("longitude", null);
+    affectedLocation.put("latitude", null);
+
+    Map<String, Object> root = new LinkedHashMap<>();
+    root.put("affectedLocation", affectedLocation);
+    root.put("transport", null);
+    root.put("affectedSite", null);
+    root.put("affectedController", null);
+    root.put("affectedCell", null);
+    root.put("affectedCellId", null);
+    root.put("affectedTechnologies", null);
+    root.put("probableCause", null);
+
+    return ENRICHED_DATA_MAPPER.convertValue(root, EnrichedData.class);
+  }
+
+  private static String extractLocationNameFromMv36NeName(String neName) {
+    String s = clean(neName);
+
+    if (s == null) {
+      return null;
+    }
+
+    int dash = s.indexOf('-');
+
+    if (dash <= 0) {
+      return null;
+    }
+
+    String location = s.substring(0, dash).trim();
+
+    return location.isEmpty() ? null : location;
   }
 
   private static Severity mapMv36Severity(Integer code) {
