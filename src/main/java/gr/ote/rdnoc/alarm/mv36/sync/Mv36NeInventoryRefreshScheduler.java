@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.annotation.Order;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -18,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Component
+@Order(50)
 @RequiredArgsConstructor
 @ConditionalOnProperty(prefix = "app.mv36.enrichment", name = "enabled", havingValue = "true")
 public class Mv36NeInventoryRefreshScheduler implements ApplicationRunner {
@@ -37,21 +39,21 @@ public class Mv36NeInventoryRefreshScheduler implements ApplicationRunner {
       return;
     }
 
-    refresh("startup");
+    refreshOnce("startup");
   }
 
   @Scheduled(
       fixedDelayString = "${app.mv36.enrichment.fixed-delay-ms:7200000}",
-      initialDelayString = "${app.mv36.enrichment.initial-delay-ms:30000}"
+      initialDelayString = "${app.mv36.enrichment.initial-delay-ms:7200000}"
   )
   public void scheduledRefresh() {
-    refresh("scheduled");
+    refreshOnce("scheduled");
   }
 
-  public void refresh(String reason) {
+  public int refreshOnce(String reason) {
     if (!running.compareAndSet(false, true)) {
       log.warn("MV36 NE inventory refresh already running. skip reason={}", reason);
-      return;
+      return cache.size();
     }
 
     try {
@@ -60,13 +62,27 @@ public class Mv36NeInventoryRefreshScheduler implements ApplicationRunner {
       List<Mv36NetworkElement> elements = inventoryClient.fetchNetworkElements();
       cache.replaceAll(elements);
 
+      int size = cache.size();
+
       log.info("MV36 NE inventory refresh completed. reason={}, size={}",
-          reason, cache.size());
+          reason, size);
+
+      return size;
 
     } catch (Exception e) {
       log.error("MV36 NE inventory refresh failed. reason={}", reason, e);
+      return cache.size();
+
     } finally {
       running.set(false);
     }
+  }
+
+  public boolean isCacheEmpty() {
+    return cache.isEmpty();
+  }
+
+  public int cacheSize() {
+    return cache.size();
   }
 }
