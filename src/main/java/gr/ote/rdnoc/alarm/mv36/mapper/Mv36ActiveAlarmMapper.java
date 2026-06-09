@@ -23,7 +23,9 @@ import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
 import gr.ote.rdnoc.alarm.mv36.model.Mv36ActiveAlarm;
 import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class Mv36ActiveAlarmMapper {
@@ -56,10 +58,32 @@ public class Mv36ActiveAlarmMapper {
 
     Mv36NeEnrichmentService neEnrichmentService = neEnrichmentServiceProvider.getIfAvailable();
 
-    Optional<Mv36NetworkElement> neOpt = neEnrichmentService != null
-        ? neEnrichmentService.findForAlarm(alarm)
-        : Optional.empty();
+    Optional<Mv36NetworkElement> neOpt = Optional.empty();
 
+    if (neEnrichmentService != null) {
+      neOpt = neEnrichmentService.findByAlarmNeId(clean(alarm.getMv36AlarmNeId()));
+
+      if (neOpt.isEmpty()) {
+        neOpt = neEnrichmentService.findByUniqueName(clean(alarm.getMv36AlarmStrNeUniqueName()));
+      }
+
+      log.info(
+        "MV36 SYNC enrichment lookup: alarmId={}, alarmNeId={}, alarmUniqueName={}, cacheHit={}, mv36NeName={}",
+        alarm.getMv36AlarmId(),
+        alarm.getMv36AlarmNeId(),
+        alarm.getMv36AlarmStrNeUniqueName(),
+        neOpt.isPresent(),
+        neOpt.map(Mv36NetworkElement::getMv36NeName).orElse(null)
+      );
+    } else {
+      log.warn(
+        "MV36 SYNC enrichment service unavailable: alarmId={}, alarmNeId={}, alarmUniqueName={}",
+        alarm.getMv36AlarmId(),
+        alarm.getMv36AlarmNeId(),
+        alarm.getMv36AlarmStrNeUniqueName()
+    );
+    }
+    
     Mv36NetworkElement ne = neOpt.orElse(null);
 
     String mv36NeName = ne != null ? clean(ne.getMv36NeName()) : null;
@@ -97,7 +121,7 @@ public class Mv36ActiveAlarmMapper {
 
     // MV36 location enrichment:
     // mv36NeName = 0057-61 MEGAOTE -> affectedLocation.name = 0057
-    ue.setEnrichedData(buildMv36EnrichedData(neName));
+    ue.setEnrichedData(buildMv36EnrichedData(mv36NeName));
 
     Map<String, String> sourceFields = alarm.toFieldMap();
 
