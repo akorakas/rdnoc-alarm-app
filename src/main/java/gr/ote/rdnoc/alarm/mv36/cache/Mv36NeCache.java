@@ -23,7 +23,7 @@ public class Mv36NeCache {
   private volatile int lastRefreshSize;
 
   public Optional<Mv36NetworkElement> findByNeId(String neId) {
-    String key = clean(neId);
+    String key = normalizeNeId(neId);
     if (key == null) {
       return Optional.empty();
     }
@@ -32,7 +32,7 @@ public class Mv36NeCache {
   }
 
   public Optional<Mv36NetworkElement> findByUniqueName(String uniqueName) {
-    String key = clean(uniqueName);
+    String key = normalizeUniqueName(uniqueName);
     if (key == null) {
       return Optional.empty();
     }
@@ -52,12 +52,12 @@ public class Mv36NeCache {
 
         ne.setLastUpdated(Instant.now());
 
-        String neId = clean(ne.getMv36NeId());
+        String neId = normalizeNeId(ne.getMv36NeId());
         if (neId != null) {
           newByNeId.put(neId, ne);
         }
 
-        String uniqueName = clean(ne.getMv36NeUniqueName());
+        String uniqueName = normalizeUniqueName(ne.getMv36NeUniqueName());
         if (uniqueName != null) {
           newByUniqueName.put(uniqueName, ne);
         }
@@ -73,8 +73,14 @@ public class Mv36NeCache {
     lastRefreshTime = Instant.now();
     lastRefreshSize = byNeId.size();
 
-    log.info("MV36 NE cache refreshed. sizeByNeId={}, sizeByUniqueName={}",
-        byNeId.size(), byUniqueName.size());
+    log.info(
+        "MV36 NE cache refreshed. sizeByNeId={}, sizeByUniqueName={}, key819Exists={}, key0dot819Exists={}, uniqueNYMAA83Exists={}",
+        byNeId.size(),
+        byUniqueName.size(),
+        byNeId.containsKey("819"),
+        byNeId.containsKey("0.819"),
+        byUniqueName.containsKey("NYMA-A.83")
+    );
   }
 
   public int size() {
@@ -104,6 +110,25 @@ public class Mv36NeCache {
     lastRefreshSize = 0;
 
     log.warn("MV36 NE cache cleared");
+  }
+
+  private static String normalizeNeId(String value) {
+    String s = clean(value);
+
+    if (s == null) {
+      return null;
+    }
+
+    // SNMP table index may appear as 0.819, while alarm field is 819.
+    if (s.startsWith("0.")) {
+      s = s.substring(2).trim();
+    }
+
+    return s.isEmpty() ? null : s;
+  }
+
+  private static String normalizeUniqueName(String value) {
+    return clean(value);
   }
 
   private static String clean(String value) {

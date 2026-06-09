@@ -21,11 +21,35 @@ public class Mv36NeEnrichmentService {
   private final Mv36NeCache cache;
 
   public Optional<Mv36NetworkElement> findByAlarmNeId(String mv36AlarmNeId) {
-    return cache.findByNeId(mv36AlarmNeId);
+    String key = normalizeNeId(mv36AlarmNeId);
+
+    if (key == null) {
+      return Optional.empty();
+    }
+
+    Optional<Mv36NetworkElement> result = cache.findByNeId(key);
+
+    if (result.isEmpty()) {
+      log.debug("MV36 NE cache miss by neId={}", key);
+    }
+
+    return result;
   }
 
   public Optional<Mv36NetworkElement> findByUniqueName(String mv36NeUniqueName) {
-    return cache.findByUniqueName(mv36NeUniqueName);
+    String key = clean(mv36NeUniqueName);
+
+    if (key == null) {
+      return Optional.empty();
+    }
+
+    Optional<Mv36NetworkElement> result = cache.findByUniqueName(key);
+
+    if (result.isEmpty()) {
+      log.debug("MV36 NE cache miss by uniqueName={}", key);
+    }
+
+    return result;
   }
 
   public Optional<Mv36NetworkElement> findForAlarm(Mv36ActiveAlarm alarm) {
@@ -138,12 +162,15 @@ public class Mv36NeEnrichmentService {
   private Optional<Mv36NetworkElement> findNe(String alarmNeId, String fallbackUniqueName) {
     Optional<Mv36NetworkElement> neOpt = Optional.empty();
 
-    if (notBlank(alarmNeId)) {
-      neOpt = findByAlarmNeId(alarmNeId);
+    String normalizedNeId = normalizeNeId(alarmNeId);
+    String normalizedUniqueName = clean(fallbackUniqueName);
+
+    if (notBlank(normalizedNeId)) {
+      neOpt = findByAlarmNeId(normalizedNeId);
     }
 
-    if (neOpt.isEmpty() && notBlank(fallbackUniqueName)) {
-      neOpt = findByUniqueName(fallbackUniqueName);
+    if (neOpt.isEmpty() && notBlank(normalizedUniqueName)) {
+      neOpt = findByUniqueName(normalizedUniqueName);
     }
 
     return neOpt;
@@ -189,6 +216,35 @@ public class Mv36NeEnrichmentService {
     }
 
     String s = String.valueOf(value).trim();
+
+    if (s.isEmpty() || "--".equals(s)) {
+      return null;
+    }
+
+    return s;
+  }
+
+  private String normalizeNeId(String value) {
+    String s = clean(value);
+
+    if (s == null) {
+      return null;
+    }
+
+    // SNMP table index may appear as 0.819, while alarm field is 819.
+    if (s.startsWith("0.")) {
+      s = s.substring(2).trim();
+    }
+
+    return s.isEmpty() ? null : s;
+  }
+
+  private String clean(String value) {
+    if (value == null) {
+      return null;
+    }
+
+    String s = value.trim();
 
     if (s.isEmpty() || "--".equals(s)) {
       return null;
