@@ -7,11 +7,15 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.kafka.annotation.EnableKafka;
 
 import gr.ote.rdnoc.alarm.service.config.CorrelationProperties;
+import gr.ote.rdnoc.alarm.service.sync.SyncMarkerProperties;
 
 @SpringBootApplication
 @ConfigurationPropertiesScan
 @EnableKafka
-@EnableConfigurationProperties(CorrelationProperties.class)
+@EnableConfigurationProperties({
+    CorrelationProperties.class,
+    SyncMarkerProperties.class
+})
 public class KafkaApplication {
   public static void main(String[] args) {
     SpringApplication.run(KafkaApplication.class, args);

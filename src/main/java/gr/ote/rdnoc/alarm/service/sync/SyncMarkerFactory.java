@@ -25,21 +25,22 @@ public class SyncMarkerFactory {
   private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
 
   /**
-   * Backward-compatible NSP marker methods.
-   * These preserve the existing NSP/ATNOI behavior.
+   * Backward-compatible methods.
+   * These preserve old NSP/ATNOI behavior.
+   *
+   * New code should prefer the source-aware methods below.
    */
   public String buildSyncStart() {
-    return buildNspMarker(EventType.SYNC_START);
+    return build(EventType.SYNC_START, EMSId.NSP_ATNOI, EMSVendorID.NSP, EMSDomain.UNKNOWN);
   }
 
   public String buildSyncEnd() {
-    return buildNspMarker(EventType.SYNC_END);
+    return build(EventType.SYNC_END, EMSId.NSP_ATNOI, EMSVendorID.NSP, EMSDomain.UNKNOWN);
   }
 
   /**
    * Source-aware marker methods.
-   * MV36 gets TelegrafGenericEvent as sourceEvent.
-   * NSP_ATNOI keeps NokiaAtnoiAlarm as sourceEvent.
+   * These should be used by SyncCoordinator for all systems.
    */
   public String buildSyncStart(EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
     return build(EventType.SYNC_START, sourceEms, vendor, domain);
@@ -50,25 +51,35 @@ public class SyncMarkerFactory {
   }
 
   private String build(EventType type, EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
-    if (sourceEms == EMSId.MV36_MOBILE) {
-      return buildMv36Marker(type, sourceEms, vendor, domain);
+    if (sourceEms == null) {
+      throw new IllegalArgumentException("sourceEms must not be null");
+    }
+    if (vendor == null) {
+      throw new IllegalArgumentException("vendor must not be null");
+    }
+    if (domain == null) {
+      throw new IllegalArgumentException("domain must not be null");
     }
 
     if (sourceEms == EMSId.NSP_ATNOI) {
-      return buildNspMarker(type);
+      return buildNspMarker(type, sourceEms, vendor, domain);
+    }
+
+    if (sourceEms == EMSId.MV36_MOBILE) {
+      return buildMv36Marker(type, sourceEms, vendor, domain);
     }
 
     return buildGenericMarker(type, sourceEms, vendor, domain);
   }
 
-  private String buildNspMarker(EventType type) {
+  private String buildNspMarker(
+      EventType type,
+      EMSId sourceEms,
+      EMSVendorID vendor,
+      EMSDomain domain
+  ) {
     try {
-      UnifiedEvent u = baseMarker(
-          type,
-          EMSId.NSP_ATNOI,
-          EMSVendorID.NSP,
-          EMSDomain.UNKNOWN
-      );
+      UnifiedEvent u = baseMarker(type, sourceEms, vendor, domain);
 
       NokiaAtnoiAlarm se = new NokiaAtnoiAlarm();
       se.setEventType(type);
@@ -82,7 +93,7 @@ public class SyncMarkerFactory {
 
       u.setMetadata(Map.of(
           "source", "SYNC",
-          "sourceEms", EMSId.NSP_ATNOI.name(),
+          "sourceEms", sourceEms.name(),
           "markerType", type.name()
       ));
 
@@ -93,7 +104,12 @@ public class SyncMarkerFactory {
     }
   }
 
-  private String buildMv36Marker(EventType type, EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
+  private String buildMv36Marker(
+      EventType type,
+      EMSId sourceEms,
+      EMSVendorID vendor,
+      EMSDomain domain
+  ) {
     try {
       UnifiedEvent u = baseMarker(type, sourceEms, vendor, domain);
 
@@ -138,7 +154,12 @@ public class SyncMarkerFactory {
     }
   }
 
-  private String buildGenericMarker(EventType type, EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
+  private String buildGenericMarker(
+      EventType type,
+      EMSId sourceEms,
+      EMSVendorID vendor,
+      EMSDomain domain
+  ) {
     try {
       UnifiedEvent u = baseMarker(type, sourceEms, vendor, domain);
 
@@ -168,11 +189,19 @@ public class SyncMarkerFactory {
       return M.writeValueAsString(u);
 
     } catch (Exception e) {
-      throw new RuntimeException("Failed to build generic sync marker " + type + " for " + sourceEms, e);
+      throw new RuntimeException(
+          "Failed to build generic sync marker " + type + " for " + sourceEms,
+          e
+      );
     }
   }
 
-  private UnifiedEvent baseMarker(EventType type, EMSId sourceEms, EMSVendorID vendor, EMSDomain domain) {
+  private UnifiedEvent baseMarker(
+      EventType type,
+      EMSId sourceEms,
+      EMSVendorID vendor,
+      EMSDomain domain
+  ) {
     UnifiedEvent u = new UnifiedEvent();
 
     u.setSourceEms(sourceEms);
@@ -184,7 +213,7 @@ public class SyncMarkerFactory {
     u.setTimestamp(Instant.now());
 
     u.setSerialNo("");
-    u.setFaultId("");
+    u.setFaultId(type.name());
     u.setNeName("");
     u.setNeEquipment("");
     u.setAlarmIdentifier(sourceEms.name() + "_" + type.name());
