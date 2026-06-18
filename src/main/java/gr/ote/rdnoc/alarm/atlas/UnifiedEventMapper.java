@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
+import gr.ote.atlas.events.emsspecificevents.NokiaNfmTAlarm;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
 import gr.ote.atlas.events.enums.EMSDomain;
 import gr.ote.atlas.events.enums.EMSId;
@@ -39,15 +40,14 @@ public class UnifiedEventMapper {
 
   private final Mv36NeEnrichmentService mv36NeEnrichmentService;
 
-  // TNMS timestamp: "yyyy-MM-dd HH:mm:ss" (no timezone in string)
+  // TNMS timestamp: "yyyy-MM-dd HH:mm:ss" without timezone.
   private static final DateTimeFormatter TNMS_TS_FMT =
       DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
   // Choose the zone TNMS uses for that string.
-  // If TNMS timestamps are UTC, change to ZoneId.of("UTC"). "Europe/Athens"
   private static final ZoneId TNMS_ZONE = ZoneId.of("UTC");
 
-  // MV36 raisingTime is SNMP DateAndTime hex (RFC2579 style)
+  // MV36 raisingTime is SNMP DateAndTime hex, RFC2579 style.
   // If timezone is not provided in the payload, we assume this default zone.
   private static final ZoneId MV36_DEFAULT_ZONE = ZoneId.of("Europe/Athens");
 
@@ -62,12 +62,27 @@ public class UnifiedEventMapper {
 
     JsonNode sourceEventNode = ctx.get("sourceEvent");
 
-    String eventTime = ctx.get("eventTime");   // NSP subscription only (ISO)
-    Object tsObj     = ctx.get("timestamp");   // can be ms/sec/decimal-sec depending on flow
+    /*
+     * For NOKIA_NFM_T:
+     * - sourceEventNode should be the extracted alarm body.
+     * - alarmNode can also be present and is preferred if available.
+     *
+     * This supports both:
+     * - Kafka notification flow, where alarmNode is nsp-fault:alarm-create/change/delete.
+     * - REST snapshot flow, where sourceEvent is already the alarm row.
+     */
+    JsonNode alarmNode = ctx.get("alarmNode");
+    JsonNode fieldNode =
+        alarmNode != null && !alarmNode.isNull()
+            ? alarmNode
+            : sourceEventNode;
+
+    String eventTime = ctx.get("eventTime");
+    Object tsObj     = ctx.get("timestamp");
     Long tsMs        = toEpochMillis(tsObj);
 
-    String typeStr   = clean(ctx.get("type"));       // YAML computed: EVENT/FAULT/CLEAR/ACKNOWLEDGE...
-    String sevStr    = clean(ctx.get("severity"));   // YAML computed (optional)
+    String typeStr   = clean(ctx.get("type"));
+    String sevStr    = clean(ctx.get("severity"));
 
     String emsDomainRaw = clean(ctx.get("emsDomain"));
     String neId = clean(ctx.get("neId"));
@@ -79,7 +94,6 @@ public class UnifiedEventMapper {
     String alarmIdentifier = clean(ctx.get("alarmIdentifier"));
     String objectFullName = clean(ctx.get("objectFullName"));
 
-    // allow YAML override (EXAGRID / INFINERA_TNMS / MV36_MOBILE etc.)
     String sourceEmsRaw = clean(ctx.get("sourceEms"));
     String vendorRaw    = clean(ctx.get("emsVendorID"));
 
@@ -91,22 +105,20 @@ public class UnifiedEventMapper {
     ue.setSourceEms(sourceEms);
     ue.setEmsVendorID(vendor);
 
-    // ------------------------------------------------------------------
-    // TELEGRAF FLOWS
-    //   - EXAGRID: special field extraction + type classification, severity always UNKNOWN
-    //   - INFINERA_TNMS: trust YAML computed fields, but force sourceEvent to TelegrafGenericEvent
-    //   - MV36_MOBILE: field extraction by prefix/exact key, DateAndTime timestamp decode
-    // ------------------------------------------------------------------
     boolean isTelegraf = looksLikeTelegraf(sourceEventNode);
     boolean isExaGrid  = sourceEms == EMSId.EXAGRID;
     boolean isTnms     = sourceEms == EMSId.INFINERA_TNMS;
     boolean isMv36     = sourceEms == EMSId.MV36_MOBILE;
+    boolean isNfmT     = sourceEms == EMSId.NOKIA_NFM_T;
 
+    // ------------------------------------------------------------------
+    // TELEGRAF FLOWS
+    //   - EXAGRID
+    //   - INFINERA_TNMS
+    //   - MV36_MOBILE
+    // ------------------------------------------------------------------
     if (isTelegraf && (isExaGrid || isTnms || isMv36)) {
 
-      // Preserve raw Telegraf payload as TelegrafGenericEvent.
-      // For MV36 only, trim field keys from first "." onward:
-      // mv36AlarmNeId.0.157 -> mv36AlarmNeId
       ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode, isMv36));
 
       if (isExaGrid) {
@@ -116,8 +128,7 @@ public class UnifiedEventMapper {
         applyMv36MobileMapping(ue, sourceEventNode, tsMs, eventTime, emsDomainRaw);
 
       } else {
-        // INFINERA_TNMS and future Telegraf-based non-ExaGrid flows:
-        // Use YAML-provided ctx fields for UnifiedEvent properties.
+        // INFINERA_TNMS and future Telegraf-based non-ExaGrid flows.
         ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
         ue.setType(mapEventType(typeStr));
         ue.setSeverity(mapSeverity(sevStr));
@@ -145,10 +156,36 @@ public class UnifiedEventMapper {
         ue.setAlarmIdentifier(alarmIdentifier);
       }
 
+    } else if (isNfmT) {
+
+      // ------------------------------------------------------------------
+      // NOKIA NFM-T / WSNOC mapping
+      // ------------------------------------------------------------------
+      applyNokiaNfmTMapping(
+          ue,
+          ctx,
+          sourceEventNode,
+          fieldNode,
+          tsMs,
+          eventTime,
+          typeStr,
+          sevStr,
+          emsDomainRaw,
+          neId,
+          neName,
+          affectedObjectName,
+          neEquipmentFromCtx,
+          faultId,
+          serialNo,
+          alarmIdentifier,
+          objectFullName
+      );
+
     } else {
 
       // ------------------------------------------------------------------
-      // NSP mapping
+      // NSP / ATNOI mapping
+      // Existing behavior preserved.
       // ------------------------------------------------------------------
       ue.setEmsDomain(mapDomain(firstNonBlank(emsDomainRaw, getText(sourceEventNode, "sourceType"))));
       ue.setType(mapEventType(typeStr));
@@ -159,7 +196,7 @@ public class UnifiedEventMapper {
       ue.setFaultId(firstNonBlank(faultId, getText(sourceEventNode, "alarmName")));
       ue.setNeName(firstNonBlank(neName, getText(sourceEventNode, "neName")));
 
-      String neEquip = (affectedObjectName != null ? affectedObjectName : "");
+      String neEquip = affectedObjectName != null ? affectedObjectName : "";
       ue.setNeEquipment(neEquip);
 
       ue.setAlarmIdentifier(firstNonBlank(alarmIdentifier, objectFullName, faultId, serialNo));
@@ -182,7 +219,7 @@ public class UnifiedEventMapper {
       n.setAdditionalText(getText(sourceEventNode, "additionalText"));
       n.setSourceSystem(getText(sourceEventNode, "sourceSystem"));
 
-      // delete fallbacks
+      // Delete fallbacks.
       if (n.getObjectId() == null) n.setObjectId(serialNo);
       if (n.getObjectFullName() == null) n.setObjectFullName(objectFullName);
       if (n.getAlarmName() == null) n.setAlarmName(faultId);
@@ -193,7 +230,6 @@ public class UnifiedEventMapper {
     }
 
     // enrichedData from context can override only if present.
-    // For MV36 Kafka, ctx.enrichedData is normally null, so MV36 enrichedData remains.
     Object edObj = ctx.get("enrichedData");
     if (edObj instanceof EnrichedData ed) {
       ue.setEnrichedData(ed);
@@ -211,15 +247,208 @@ public class UnifiedEventMapper {
   }
 
   // ============================================================================================
+  // NOKIA NFM-T / WSNOC mapping
+  // ============================================================================================
+
+  private static void applyNokiaNfmTMapping(
+      UnifiedEvent ue,
+      TransformContext ctx,
+      JsonNode sourceEventNode,
+      JsonNode fieldNode,
+      Long tsMs,
+      String eventTime,
+      String typeStr,
+      String sevStr,
+      String emsDomainRaw,
+      String neId,
+      String neName,
+      String affectedObjectName,
+      String neEquipmentFromCtx,
+      String faultId,
+      String serialNo,
+      String alarmIdentifier,
+      String objectFullName
+  ) {
+
+    EventType eventType = mapEventType(typeStr);
+
+    /*
+     * For NFM-T, sourceType is usually "nfmt".
+     * The old mapDomain() does not know "nfmt", so force TRANSPORT unless YAML explicitly provides another valid enum.
+     */
+    ue.setEmsDomain(parseEnumOrDefault(
+        EMSDomain.class,
+        emsDomainRaw,
+        EMSDomain.TRANSPORT
+    ));
+
+    ue.setType(eventType);
+
+    String effectiveSeverity = firstNonBlank(
+        sevStr,
+        readTextOrNewValue(fieldNode, "severity"),
+        readTextOrNewValue(sourceEventNode, "severity")
+    );
+
+    ue.setSeverity(mapSeverity(effectiveSeverity));
+
+    Long effectiveTimestampMs;
+
+    if (eventType == EventType.CLEAR) {
+      effectiveTimestampMs = firstNonNull(
+          tsMs,
+          readLongOrNewValue(fieldNode, "lastTimeCleared")
+      );
+
+      if (effectiveTimestampMs == null) {
+        effectiveTimestampMs = firstNonNull(
+            readLongOrNewValue(fieldNode, "lastTimeDetected"),
+            readLongOrNewValue(fieldNode, "firstTimeDetected")
+        );
+      }
+
+    } else {
+      effectiveTimestampMs = firstNonNull(
+          tsMs,
+          readLongOrNewValue(fieldNode, "lastTimeDetected")
+      );
+
+      if (effectiveTimestampMs == null) {
+        effectiveTimestampMs = firstNonNull(
+            readLongOrNewValue(fieldNode, "firstTimeDetected"),
+            readLongOrNewValue(fieldNode, "lastTimeCleared")
+        );
+      }
+    }
+
+    ue.setTimestamp(parseEventTime(effectiveTimestampMs, eventTime));
+
+    String effectiveSerialNo = firstNonBlank(
+        serialNo,
+        getText(fieldNode, "objectId"),
+        getText(fieldNode, "fdn")
+    );
+
+    String effectiveFaultId = firstNonBlank(
+        faultId,
+        getText(fieldNode, "alarmName"),
+        getText(fieldNode, "probableCause"),
+        getText(fieldNode, "specificProblem")
+    );
+
+    String effectiveNeName = firstNonBlank(
+        neName,
+        getText(fieldNode, "neName")
+    );
+
+    String effectiveNeEquipment = firstNonBlank(
+        neEquipmentFromCtx,
+        affectedObjectName,
+        getText(fieldNode, "affectedObjectName"),
+        ""
+    );
+
+    String effectiveObjectFullName = firstNonBlank(
+        objectFullName,
+        getText(fieldNode, "objectFullName")
+    );
+
+    String effectiveAlarmIdentifier = firstNonBlank(
+        alarmIdentifier,
+        effectiveObjectFullName,
+        getText(fieldNode, "affectedObject"),
+        effectiveFaultId,
+        effectiveSerialNo
+    );
+
+    ue.setSerialNo(effectiveSerialNo);
+    ue.setFaultId(effectiveFaultId);
+    ue.setNeName(effectiveNeName);
+    ue.setNeEquipment(effectiveNeEquipment);
+    ue.setAlarmIdentifier(effectiveAlarmIdentifier);
+
+    NokiaNfmTAlarm n = new NokiaNfmTAlarm();
+
+    n.setOriginalSeverity(readTextOrNewValue(fieldNode, "originalSeverity"));
+    n.setPreviousSeverity(readTextOrNewValue(fieldNode, "previousSeverity"));
+    n.setHighestSeverity(readTextOrNewValue(fieldNode, "highestSeverity"));
+    n.setSeverity(readTextOrNewValue(fieldNode, "severity"));
+
+    n.setNeId(getText(fieldNode, "neId"));
+    n.setNeName(getText(fieldNode, "neName"));
+
+    n.setAlarmName(getText(fieldNode, "alarmName"));
+    n.setSpecificProblem(getText(fieldNode, "specificProblem"));
+    n.setAffectedObjectName(getText(fieldNode, "affectedObjectName"));
+    n.setAffectedObject(getText(fieldNode, "affectedObject"));
+    n.setAffectedObjectType(getText(fieldNode, "affectedObjectType"));
+    n.setAlarmType(getText(fieldNode, "alarmType"));
+    n.setProbableCause(getText(fieldNode, "probableCause"));
+
+    n.setFirstTimeDetected(readLongOrNewValue(fieldNode, "firstTimeDetected"));
+    n.setLastTimeDetected(readLongOrNewValue(fieldNode, "lastTimeDetected"));
+    n.setLastTimeCleared(readLongOrNewValue(fieldNode, "lastTimeCleared"));
+    n.setLastTimeAcknowledged(readLongOrNewValue(fieldNode, "lastTimeAcknowledged"));
+    n.setLastTimeSeverityChanged(readLongOrNewValue(fieldNode, "lastTimeSeverityChanged"));
+    n.setLastTimeEscalated(readLongOrNewValue(fieldNode, "lastTimeEscalated"));
+    n.setLastTimeDeEscalated(readLongOrNewValue(fieldNode, "lastTimeDeEscalated"));
+
+    n.setAdminState(getText(fieldNode, "adminState"));
+    n.setSourceType(getText(fieldNode, "sourceType"));
+    n.setSourceSystem(getText(fieldNode, "sourceSystem"));
+
+    n.setObjectId(getText(fieldNode, "objectId"));
+    n.setFdn(getText(fieldNode, "fdn"));
+    n.setObjectFullName(getText(fieldNode, "objectFullName"));
+
+    n.setAdditionalText(getText(fieldNode, "additionalText"));
+    n.setUserText(getText(fieldNode, "userText"));
+
+    n.setAcknowledged(readBooleanOrNewValue(fieldNode, "acknowledged"));
+    n.setWasAcknowledged(readBooleanOrNewValue(fieldNode, "wasAcknowledged"));
+    n.setAcknowledgedBy(getText(fieldNode, "acknowledgedBy"));
+    n.setClearedBy(getText(fieldNode, "clearedBy"));
+    n.setDeletedBy(getText(fieldNode, "deletedBy"));
+
+    n.setFrequency(readIntOrNewValue(fieldNode, "frequency"));
+    n.setNumberOfOccurrences(readIntOrNewValue(fieldNode, "numberOfOccurrences"));
+    n.setNumberOfOccurrencesSinceClear(readIntOrNewValue(fieldNode, "numberOfOccurrencesSinceClear"));
+    n.setNumberOfOccurrencesSinceAck(readIntOrNewValue(fieldNode, "numberOfOccurrencesSinceAck"));
+
+    n.setServiceAffecting(readBooleanOrNewValue(fieldNode, "serviceAffecting"));
+    n.setImplicitlyCleared(readBooleanOrNewValue(fieldNode, "implicitlyCleared"));
+    n.setRootCause(readBooleanOrNewValue(fieldNode, "rootCause"));
+
+    n.setImpact(readIntOrNewValue(fieldNode, "impact"));
+    n.setNodeTimeOffset(readIntOrNewValue(fieldNode, "nodeTimeOffset"));
+
+    n.setNotificationType(clean(ctx.get("alarmEventKind")));
+    n.setEventTime(eventTime);
+
+    // Fallbacks for DELETE or sparse notifications.
+    if (n.getObjectId() == null) n.setObjectId(effectiveSerialNo);
+    if (n.getFdn() == null) n.setFdn(getText(fieldNode, "fdn"));
+    if (n.getObjectFullName() == null) n.setObjectFullName(effectiveObjectFullName);
+    if (n.getAlarmName() == null) n.setAlarmName(effectiveFaultId);
+    if (n.getNeId() == null) n.setNeId(neId);
+    if (n.getNeName() == null) n.setNeName(effectiveNeName);
+    if (n.getAffectedObjectName() == null) n.setAffectedObjectName(effectiveNeEquipment);
+
+    ue.setSourceEvent(n);
+  }
+
+  // ============================================================================================
   // EXAGRID mapping
   // ============================================================================================
 
-  private void applyExaGridMapping(UnifiedEvent ue,
-                                   JsonNode sourceEventNode,
-                                   Long tsMs,
-                                   String eventTime,
-                                   String typeStr,
-                                   String sevStr) {
+  private void applyExaGridMapping(
+      UnifiedEvent ue,
+      JsonNode sourceEventNode,
+      Long tsMs,
+      String eventTime,
+      String typeStr,
+      String sevStr
+  ) {
 
     JsonNode fields = sourceEventNode != null ? sourceEventNode.get("fields") : null;
 
@@ -258,17 +487,16 @@ public class UnifiedEventMapper {
   // MV36_MOBILE mapping
   // ============================================================================================
 
-  private void applyMv36MobileMapping(UnifiedEvent ue,
-                                      JsonNode sourceEventNode,
-                                      Long ctxTsMs,
-                                      String eventTime,
-                                      String emsDomainRaw) {
+  private void applyMv36MobileMapping(
+      UnifiedEvent ue,
+      JsonNode sourceEventNode,
+      Long ctxTsMs,
+      String eventTime,
+      String emsDomainRaw
+  ) {
 
     JsonNode fields = sourceEventNode != null ? sourceEventNode.get("fields") : null;
 
-    // Supports both:
-    //   mv36AlarmNeId
-    //   mv36AlarmNeId.0.157
     String neUniqueName = findFieldText(fields, "mv36AlarmStrNeUniqueName");
     String shelf        = findFieldText(fields, "mv36AlarmStrShelf");
     String card         = findFieldText(fields, "mv36AlarmStrCard");
@@ -336,8 +564,6 @@ public class UnifiedEventMapper {
     String identifier = joinNonBlank("/", effectiveNeName, shelf, card, portId, alarmStr);
     ue.setAlarmIdentifier(firstNonBlank(identifier, alarmStr, serial));
 
-    // MV36 location enrichment:
-    // effectiveNeName = 0057-61 MEGAOTE -> affectedLocation.name = 0057
     ue.setEnrichedData(buildMv36EnrichedData(effectiveNeName));
 
     ue.setSeverity(mapMv36Severity(sevCode));
@@ -430,13 +656,11 @@ public class UnifiedEventMapper {
       return null;
     }
 
-    // 1) Already-trimmed field: mv36AlarmNeId
     JsonNode exact = fields.get(baseName);
     if (exact != null && !exact.isNull()) {
       return exact.asText();
     }
 
-    // 2) Raw Telegraf field: mv36AlarmNeId.0.157
     return findFieldTextByPrefix(fields, baseName + ".");
   }
 
@@ -454,20 +678,20 @@ public class UnifiedEventMapper {
   }
 
   private static String findFieldTextByPrefix(JsonNode fields, String prefix) {
-    if (fields == null || !fields.isObject() || prefix == null) return null;
-
-    var it = fields.properties().iterator();
-    while (it.hasNext()) {
-      var e = it.next();
+    if (fields == null || !fields.isObject() || prefix == null) {
+      return null;
+    }
+  
+    for (Map.Entry<String, JsonNode> e : fields.properties()) {
       if (e.getKey().startsWith(prefix)) {
-        return (e.getValue() == null || e.getValue().isNull()) ? null : e.getValue().asText();
+        JsonNode value = e.getValue();
+        return value == null || value.isNull() ? null : value.asText();
       }
     }
-
+  
     return null;
   }
 
-  /** Joins non-blank parts with separator. Skips "--" and trims whitespace. */
   private static String joinNonBlank(String sep, String... parts) {
     if (parts == null) return null;
 
@@ -487,9 +711,6 @@ public class UnifiedEventMapper {
     return sb.length() == 0 ? null : sb.toString();
   }
 
-  /**
-   * Decode SNMP DateAndTime hex (RFC2579 style) into epoch millis.
-   */
   private static Long mv36DateAndTimeHexToEpochMs(String hex) {
     if (hex == null || hex.isBlank()) return null;
 
@@ -585,7 +806,6 @@ public class UnifiedEventMapper {
       int dot = k.indexOf('.');
       String nk = (dot > 0) ? k.substring(0, dot) : k;
 
-      // keep first on collision
       out.putIfAbsent(nk, e.getValue());
     }
 
@@ -796,6 +1016,204 @@ public class UnifiedEventMapper {
     JsonNode v = n.get(field);
 
     return (v == null || v.isNull()) ? null : v.asLong();
+  }
+
+  private static String readTextOrNewValue(JsonNode node, String field) {
+    if (node == null || field == null) {
+      return null;
+    }
+
+    JsonNode v = node.get(field);
+
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isObject()) {
+      JsonNode newValue = v.get("new-value");
+      if (newValue != null && !newValue.isNull()) {
+        return newValue.asText();
+      }
+
+      JsonNode oldValue = v.get("old-value");
+      if (oldValue != null && !oldValue.isNull()) {
+        return oldValue.asText();
+      }
+
+      return v.toString();
+    }
+
+    return v.asText();
+  }
+
+  private static Long readLongOrNewValue(JsonNode node, String field) {
+    if (node == null || field == null) {
+      return null;
+    }
+
+    JsonNode v = node.get(field);
+
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isObject()) {
+      JsonNode newValue = v.get("new-value");
+      if (newValue != null && !newValue.isNull()) {
+        return jsonNodeToLong(newValue);
+      }
+
+      JsonNode oldValue = v.get("old-value");
+      if (oldValue != null && !oldValue.isNull()) {
+        return jsonNodeToLong(oldValue);
+      }
+
+      return null;
+    }
+
+    return jsonNodeToLong(v);
+  }
+
+  private static Integer readIntOrNewValue(JsonNode node, String field) {
+    if (node == null || field == null) {
+      return null;
+    }
+
+    JsonNode v = node.get(field);
+
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isObject()) {
+      JsonNode newValue = v.get("new-value");
+      if (newValue != null && !newValue.isNull()) {
+        return jsonNodeToInt(newValue);
+      }
+
+      JsonNode oldValue = v.get("old-value");
+      if (oldValue != null && !oldValue.isNull()) {
+        return jsonNodeToInt(oldValue);
+      }
+
+      return null;
+    }
+
+    return jsonNodeToInt(v);
+  }
+
+  private static Boolean readBooleanOrNewValue(JsonNode node, String field) {
+    if (node == null || field == null) {
+      return null;
+    }
+
+    JsonNode v = node.get(field);
+
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isObject()) {
+      JsonNode newValue = v.get("new-value");
+      if (newValue != null && !newValue.isNull()) {
+        return jsonNodeToBoolean(newValue);
+      }
+
+      JsonNode oldValue = v.get("old-value");
+      if (oldValue != null && !oldValue.isNull()) {
+        return jsonNodeToBoolean(oldValue);
+      }
+
+      return null;
+    }
+
+    return jsonNodeToBoolean(v);
+  }
+
+  private static Long jsonNodeToLong(JsonNode v) {
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isNumber()) {
+      return v.asLong();
+    }
+
+    if (v.isTextual()) {
+      String s = v.asText();
+
+      if (s == null || s.isBlank()) {
+        return null;
+      }
+
+      try {
+        return Long.parseLong(s.trim());
+      } catch (Exception ignore) {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  private static Integer jsonNodeToInt(JsonNode v) {
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isNumber()) {
+      return v.asInt();
+    }
+
+    if (v.isTextual()) {
+      String s = v.asText();
+
+      if (s == null || s.isBlank()) {
+        return null;
+      }
+
+      try {
+        return Integer.parseInt(s.trim());
+      } catch (Exception ignore) {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  private static Boolean jsonNodeToBoolean(JsonNode v) {
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isBoolean()) {
+      return v.asBoolean();
+    }
+
+    if (v.isTextual()) {
+      String s = v.asText();
+
+      if (s == null || s.isBlank()) {
+        return null;
+      }
+
+      String normalized = s.trim().toLowerCase();
+
+      return switch (normalized) {
+        case "true", "yes", "1" -> Boolean.TRUE;
+        case "false", "no", "0" -> Boolean.FALSE;
+        default -> null;
+      };
+    }
+
+    if (v.isNumber()) {
+      int i = v.asInt();
+      if (i == 1) return Boolean.TRUE;
+      if (i == 0) return Boolean.FALSE;
+    }
+
+    return null;
   }
 
   private static <E extends Enum<E>> E parseEnumOrDefault(Class<E> enumClass, String raw, E fallback) {
