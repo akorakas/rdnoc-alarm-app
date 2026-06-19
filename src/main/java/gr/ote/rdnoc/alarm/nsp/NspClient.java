@@ -6,7 +6,6 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,15 +36,9 @@ public class NspClient {
   private final NspSiteSelector siteSelector;
 
   // ───── Values from application.yml ─────
+
   @Value("${app.rest.nsp.scheme:https}")
   private String scheme;
-
-  /**
-   * Kept for backward compatibility.
-   * Actual active host is managed by NspSiteSelector.
-   */
-  @Value("${app.rest.nsp.host}")
-  private String host;
 
   @Value("${app.rest.nsp.paths.token}")
   private String tokenPath;
@@ -53,7 +46,7 @@ public class NspClient {
   @Value("${app.rest.nsp.paths.alarms}")
   private String alarmsPath;
 
-  // subscriptions base path (used for create + renew)
+  // Subscriptions base path, used for create + renew + delete
   @Value("${app.rest.nsp.paths.subscriptions:/nbi-notification/api/v1/notifications/subscriptions}")
   private String subscriptionsPath;
 
@@ -69,30 +62,33 @@ public class NspClient {
   @Value("${app.rest.nsp.headers.accept:application/json}")
   private String accept;
 
-  // Where the alarms array lives (default works with /response/data)
+  // Where the alarms array lives. Default works with /response/data.
   @Value("${app.rest.nsp.alarms-array-path:/response/data}")
   private String alarmsArrayPath;
 
-  // Raw alarm filter (read from YAML)
+  // Raw alarm filter, read from YAML.
   @Value("${app.rest.nsp.alarm-filter:}")
   private String alarmFilter;
 
   /**
-   * NSP sometimes expects DOUBLE-URL-encoding in alarmFilter:
-   * Example: severity%253D'major'
+   * NSP sometimes expects double URL encoding in alarmFilter.
    *
-   * In your environment, you verified X1 encoding works, so set:
-   *   app.rest.nsp.alarm-filter-double-encode=false
+   * Example:
+   * severity%253D'major'
+   *
+   * In your environment, you verified single encoding works, so use:
+   *
+   * app.rest.nsp.alarm-filter-double-encode=false
    */
   @Value("${app.rest.nsp.alarm-filter-double-encode:true}")
   private boolean alarmFilterDoubleEncode;
 
-  // Optional sort (one or more)
+  // Optional sort. Supports one or more sort expressions separated by semicolon.
   @Value("${app.rest.nsp.sort:lastTimeDetected,desc}")
   private String sortParam;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Cursor-pagination
+  // Cursor pagination
   // ─────────────────────────────────────────────────────────────────────────
 
   @Value("${app.rest.nsp.cursor-pagination.enabled:true}")
@@ -110,7 +106,10 @@ public class NspClient {
   @Value("${app.rest.nsp.cursor-pagination.dedupe:true}")
   private boolean cursorDedupeEnabled;
 
+  // ─────────────────────────────────────────────────────────────────────────
   // Subscription request payload parts
+  // ─────────────────────────────────────────────────────────────────────────
+
   @Value("${app.rest.nsp.subscription.category-name:NSP-FAULT}")
   private String subscriptionCategoryName;
 
@@ -120,17 +119,13 @@ public class NspClient {
   @Value("${app.rest.nsp.subscription.property-filter:affectedObjectType NOT LIKE 'NmsSystem'}")
   private String subscriptionPropertyFilter;
 
-  // ───────────────────────────────────────
-  // Token cache is host-aware.
-  // ───────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // Host-aware token cache
+  // ─────────────────────────────────────────────────────────────────────────
 
   private String cachedToken;
   private String cachedTokenHost;
   private Instant tokenExpiresAt = Instant.EPOCH;
-
-  private String baseUrl() {
-    return baseUrl(siteSelector.activeHost());
-  }
 
   private String baseUrl(String selectedHost) {
     return scheme + "://" + selectedHost;
@@ -163,6 +158,7 @@ public class NspClient {
 
       } catch (Exception e) {
         last = e;
+
         clearCachedToken();
 
         siteSelector.markFailure(candidateHost, e);
@@ -207,15 +203,25 @@ public class NspClient {
     if (rawFilter == null || rawFilter.isBlank()) {
       return "";
     }
-    return alarmFilterDoubleEncode ? urlEncodeTwice(rawFilter) : urlEncodeOnce(rawFilter);
+
+    return alarmFilterDoubleEncode
+        ? urlEncodeTwice(rawFilter)
+        : urlEncodeOnce(rawFilter);
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Token
+  // ─────────────────────────────────────────────────────────────────────────
+
   /**
-   * Cache Bearer token per host until (expires - 60s).
+   * Cache bearer token per host until expires - 60 seconds.
    */
   private synchronized String getAccessToken(String selectedHost) throws Exception {
+    if (selectedHost == null || selectedHost.isBlank()) {
+      throw new IllegalArgumentException("selectedHost is blank");
+    }
+
     if (cachedToken != null
-        && selectedHost != null
         && selectedHost.equals(cachedTokenHost)
         && Instant.now().isBefore(tokenExpiresAt.minusSeconds(60))) {
       return cachedToken;
@@ -240,7 +246,9 @@ public class NspClient {
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException(
-          "NSP token request failed on host=" + selectedHost + ": " + response.getStatusCode()
+          "NSP token request failed on host=" + selectedHost
+              + ": " + response.getStatusCode()
+              + " body=" + response.getBody()
       );
     }
 
@@ -248,9 +256,10 @@ public class NspClient {
     String accessToken = json.path("access_token").asText(null);
     int expiresIn = json.path("expires_in").asInt(600);
 
-    if (accessToken == null) {
+    if (accessToken == null || accessToken.isBlank()) {
       throw new IllegalStateException(
-          "No access_token in NSP response from host=" + selectedHost + ": " + response.getBody()
+          "No access_token in NSP response from host=" + selectedHost
+              + ": " + response.getBody()
       );
     }
 
@@ -264,7 +273,7 @@ public class NspClient {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ACTIVE ALARMS (REST snapshot) - Cursor pagination
+  // Active alarms REST snapshot
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
@@ -284,20 +293,22 @@ public class NspClient {
 
   /**
    * Cursor pagination:
-   * - call #1: base filter sorted desc -> returns up to server page size
-   * - call #2+: add AND lastTimeDetected < cursor
-   * - repeat until empty or cursor stops decreasing
+   *
+   * 1. First call uses base filter sorted descending.
+   * 2. Next calls add: lastTimeDetected < previousMinCursor.
+   * 3. Repeat until empty page, max page limit, max total limit, or non-moving cursor.
    */
   private List<String> fetchActiveAlarmEventsCursorPaged(String selectedHost) throws Exception {
-    long cursor = Long.MAX_VALUE;  // exclusive upper bound
+    long cursor = Long.MAX_VALUE;
     int page = 0;
-    int total = 0;
 
-    // Keep order of insertion (stable)
-    Map<String, String> dedup = cursorDedupeEnabled ? new LinkedHashMap<>() : null;
+    // Always initialize both collections to avoid null warnings and support both modes.
+    Map<String, String> dedup = new LinkedHashMap<>();
+    List<String> nonDedupedEvents = new ArrayList<>();
 
     while (true) {
       page++;
+
       if (page > cursorMaxPages) {
         log.warn("NSP cursor pagination safety stop: reached max-pages={}", cursorMaxPages);
         break;
@@ -308,29 +319,37 @@ public class NspClient {
           cursor == Long.MAX_VALUE ? null : cursor
       );
 
-      // Parse page data
-      PageData pd = parsePage(raw);
+      PageData pageData = parsePage(raw);
 
-      int count = pd.events().size();
+      int count = pageData.events().size();
+
       if (count == 0) {
         log.info("NSP cursor pagination finished: host={} empty page at cursor={}",
             selectedHost, cursor);
         break;
       }
 
-      long pageMinCursor = pd.minCursor();
+      long pageMinCursor = pageData.minCursor();
+
       log.info("NSP cursor pagination host={} page={} count={} minCursor={} prevCursor={}",
           selectedHost, page, count, pageMinCursor, cursor);
 
+      int total;
+
       if (cursorDedupeEnabled) {
-        for (JsonNode n : pd.events()) {
-          String key = computeDedupeKey(n);
-          String jsonStr = objectMapper.writeValueAsString(n);
+        for (JsonNode alarm : pageData.events()) {
+          String key = computeDedupeKey(alarm);
+          String jsonStr = objectMapper.writeValueAsString(alarm);
           dedup.putIfAbsent(key, jsonStr);
         }
+
         total = dedup.size();
       } else {
-        total += count;
+        for (JsonNode alarm : pageData.events()) {
+          nonDedupedEvents.add(objectMapper.writeValueAsString(alarm));
+        }
+
+        total = nonDedupedEvents.size();
       }
 
       if (total >= cursorMaxTotal) {
@@ -338,34 +357,39 @@ public class NspClient {
         break;
       }
 
-      // Safety: cursor must move backwards
       if (pageMinCursor >= cursor) {
-        log.warn("NSP cursor pagination safety stop: cursor did not decrease (host={}, prev={}, newMin={})",
+        log.warn("NSP cursor pagination safety stop: cursor did not decrease. host={}, prev={}, newMin={}",
             selectedHost, cursor, pageMinCursor);
         break;
       }
 
-      // Next cursor: strictly older than the oldest record we received
       cursor = pageMinCursor;
     }
 
     if (cursorDedupeEnabled) {
       log.info("NSP cursor pagination finished: host={} pages={} uniqueEvents={}",
           selectedHost, page, dedup.size());
+
       return new ArrayList<>(dedup.values());
     }
 
-    // fallback shouldn't be reached often
-    return Collections.emptyList();
+    log.info("NSP cursor pagination finished: host={} pages={} events={}",
+        selectedHost, page, nonDedupedEvents.size());
+
+    return nonDedupedEvents;
   }
 
   /**
    * Raw fetch with optional cursor:
-   * - cursor == null: base filter only
-   * - cursor != null: base filter AND lastTimeDetected < cursor
    *
-   * IMPORTANT:
-   * We intentionally DO NOT pass offset/limit because NSP ignores them.
+   * cursor == null:
+   *   base filter only
+   *
+   * cursor != null:
+   *   base filter AND lastTimeDetected < cursor
+   *
+   * Important:
+   * We intentionally do not pass offset/limit because NSP ignores them in your environment.
    */
   private String fetchActiveAlarmsRaw(String selectedHost, Long cursorExclusive) throws Exception {
     String token = getAccessToken(selectedHost);
@@ -379,6 +403,7 @@ public class NspClient {
     headers.setContentType(MediaType.valueOf(contentType));
 
     HttpEntity<Void> request = new HttpEntity<>(headers);
+
     ResponseEntity<String> response = restTemplate.exchange(
         URI.create(url),
         HttpMethod.GET,
@@ -388,8 +413,9 @@ public class NspClient {
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException(
-          "NSP alarms request failed on host=" + selectedHost + ": "
-              + response.getStatusCode() + " body=" + response.getBody()
+          "NSP alarms request failed on host=" + selectedHost
+              + ": " + response.getStatusCode()
+              + " body=" + response.getBody()
       );
     }
 
@@ -403,13 +429,11 @@ public class NspClient {
     StringBuilder sb = new StringBuilder();
     sb.append(baseUrl(selectedHost)).append(alarmsPath);
 
-    boolean hasQuery = false;
-
-    // Combine base filter with cursor filter in ONE alarmFilter expression
     String effectiveFilter = alarmFilter == null ? "" : alarmFilter.trim();
 
     if (cursorExclusive != null) {
       String cursorExpr = cursorField + " < " + cursorExclusive;
+
       if (effectiveFilter.isBlank()) {
         effectiveFilter = cursorExpr;
       } else {
@@ -417,40 +441,43 @@ public class NspClient {
       }
     }
 
-    if (!effectiveFilter.isBlank()) {
+    boolean hasAlarmFilter = !effectiveFilter.isBlank();
+
+    if (hasAlarmFilter) {
       String encoded = encodeAlarmFilter(effectiveFilter);
 
-      sb.append(hasQuery ? "&" : "?");
+      sb.append("?");
       sb.append("alarmFilter=").append(encoded);
-      hasQuery = true;
 
       log.info("NSP alarms raw filter : {}", effectiveFilter);
       log.info("NSP alarms encoded{}  : {}",
           alarmFilterDoubleEncode ? " x2" : " x1",
-          encoded
-      );
+          encoded);
     }
 
-    // Sort param (optional)
-    appendSortParams(sb, hasQuery);
+    appendSortParams(sb, hasAlarmFilter);
 
     return sb.toString();
   }
 
   private void appendSortParams(StringBuilder sb, boolean hasQueryAlready) {
-    if (sortParam == null || sortParam.isBlank()) return;
+    if (sortParam == null || sortParam.isBlank()) {
+      return;
+    }
 
     boolean hasQuery = hasQueryAlready;
 
-    // docs: use multiple &sort= properties
-    // your endpoint supports: sort=field,asc|desc
     String[] parts = sortParam.split(";");
-    for (String p : parts) {
-      String s = p.trim();
-      if (s.isEmpty()) continue;
+
+    for (String part : parts) {
+      String sort = part.trim();
+
+      if (sort.isEmpty()) {
+        continue;
+      }
 
       sb.append(hasQuery ? "&" : "?");
-      sb.append("sort=").append(urlEncodeOnce(s));
+      sb.append("sort=").append(urlEncodeOnce(sort));
       hasQuery = true;
     }
   }
@@ -469,12 +496,13 @@ public class NspClient {
     List<JsonNode> events = new ArrayList<>();
     long min = Long.MAX_VALUE;
 
-    for (JsonNode n : data) {
-      events.add(n);
+    for (JsonNode alarm : data) {
+      events.add(alarm);
 
-      long c = readCursorValue(n);
-      if (c > 0 && c < min) {
-        min = c;
+      long cursor = readCursorValue(alarm);
+
+      if (cursor > 0 && cursor < min) {
+        min = cursor;
       }
     }
 
@@ -482,65 +510,73 @@ public class NspClient {
   }
 
   /**
-   * Read lastTimeDetected (ms epoch). If missing/unparseable, return -1.
+   * Read lastTimeDetected, expected as epoch milliseconds.
+   * If missing or unparseable, return -1.
    */
   private long readCursorValue(JsonNode alarm) {
     JsonNode node = alarm.get(cursorField);
-    if (node == null || node.isNull()) return -1;
+
+    if (node == null || node.isNull()) {
+      return -1;
+    }
 
     if (node.isNumber()) {
       return node.asLong(-1);
     }
 
-    // Sometimes it can be string; try parse numeric
-    String s = node.asText("");
+    String value = node.asText("");
+
     try {
-      return Long.parseLong(s);
-    } catch (Exception e) {
+      return Long.parseLong(value);
+    } catch (NumberFormatException e) {
       return -1;
     }
   }
 
   /**
-   * Dedup key selection (best-effort).
+   * Dedup key selection.
    * Prefers stable unique IDs if present.
    */
   private String computeDedupeKey(JsonNode alarm) {
-    // Common candidates
-    String[] candidates = { "alarmId", "faultId", "id", "ALA_alarmId" };
+    String[] candidates = {
+        "alarmId",
+        "faultId",
+        "id",
+        "ALA_alarmId"
+    };
 
-    for (String c : candidates) {
-      JsonNode v = alarm.get(c);
-      if (v != null && !v.isNull()) {
-        String s = v.asText("").trim();
-        if (!s.isEmpty()) return c + ":" + s;
+    for (String candidate : candidates) {
+      JsonNode value = alarm.get(candidate);
+
+      if (value != null && !value.isNull()) {
+        String text = value.asText("").trim();
+
+        if (!text.isEmpty()) {
+          return candidate + ":" + text;
+        }
       }
     }
 
-    // Fallback composite key
     String alarmName = alarm.path("alarmName").asText("");
-    String obj = alarm.path("affectedObjectName").asText("");
-    long t = readCursorValue(alarm);
+    String affectedObjectName = alarm.path("affectedObjectName").asText("");
+    long detectedTime = readCursorValue(alarm);
 
-    return "fallback:" + alarmName + "|" + obj + "|" + t;
+    return "fallback:" + alarmName + "|" + affectedObjectName + "|" + detectedTime;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Extract alarms into JSON strings
-  // ─────────────────────────────────────────────────────────────────────────
-
   /**
-   * Extracts alarms array from raw JSON using alarmsArrayPath.
-   * Returns a list of individual alarm JSON payloads (string).
+   * Extract alarms array from raw JSON using alarmsArrayPath.
+   * Returns a list of individual alarm JSON payloads.
    */
   private List<String> splitAlarmEventsFromRaw(String raw) throws Exception {
     JsonNode root = objectMapper.readTree(raw);
     List<String> result = new ArrayList<>();
 
     JsonNode arrayNode;
+
     try {
-      JsonPointer ptr = JsonPointer.compile(alarmsArrayPath);
-      arrayNode = root.at(ptr);
+      JsonPointer pointer = JsonPointer.compile(alarmsArrayPath);
+      arrayNode = root.at(pointer);
     } catch (IllegalArgumentException e) {
       log.error("Invalid JSON pointer for alarms-array-path: {}", alarmsArrayPath, e);
       arrayNode = root;
@@ -550,6 +586,7 @@ public class NspClient {
       for (JsonNode node : arrayNode) {
         result.add(objectMapper.writeValueAsString(node));
       }
+
       log.info("NSP: split {} alarm(s) from {}", result.size(), alarmsArrayPath);
       return result;
     }
@@ -558,24 +595,33 @@ public class NspClient {
       for (JsonNode node : root) {
         result.add(objectMapper.writeValueAsString(node));
       }
-      log.warn("NSP: alarms-array-path {} did not resolve to array, used root array instead", alarmsArrayPath);
+
+      log.warn("NSP: alarms-array-path {} did not resolve to array, used root array instead",
+          alarmsArrayPath);
+
       return result;
     }
 
-    log.warn("NSP: alarms-array-path {} did not resolve to array; returning single raw payload", alarmsArrayPath);
-    return Collections.singletonList(raw);
+    log.warn("NSP: alarms-array-path {} did not resolve to array; returning single raw payload",
+        alarmsArrayPath);
+
+    return List.of(raw);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // SUBSCRIPTION CREATE + RENEW
+  // Subscription create, renew, delete
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Create an NSP notification subscription.
-   * Returns (subscriptionId, topicId, host).
    *
-   * This operation uses failover, because a subscription can be created on whichever
-   * NSP site is currently active/reachable.
+   * Returns:
+   * - subscriptionId
+   * - topicId
+   * - host where the subscription was created
+   *
+   * This operation uses failover because a new subscription may be created on
+   * whichever NSP site is currently reachable.
    */
   public SubscriptionInfo createSubscription() throws Exception {
     return withFailover("createSubscription", selectedHost -> {
@@ -589,7 +635,21 @@ public class NspClient {
       headers.setContentType(MediaType.APPLICATION_JSON);
       headers.setAccept(List.of(MediaType.valueOf(accept)));
 
-      // advancedFilter must be a JSON string inside JSON => must be quoted/escaped
+      /*
+       * advancedFilter must be a JSON string inside JSON.
+       *
+       * For example, the final payload becomes:
+       *
+       * {
+       *   "categories": [
+       *     {
+       *       "advancedFilter": "{\"includeAlarmDetailsOnChangeEvent\":true}",
+       *       "propertyFilter": "affectedObjectType NOT LIKE 'NmsSystem'",
+       *       "name": "NSP-FAULT"
+       *     }
+       *   ]
+       * }
+       */
       String bodyJson = """
         {
           "categories": [
@@ -607,6 +667,7 @@ public class NspClient {
         );
 
       HttpEntity<String> request = new HttpEntity<>(bodyJson, headers);
+
       ResponseEntity<String> response = restTemplate.exchange(
           URI.create(url),
           HttpMethod.POST,
@@ -616,8 +677,9 @@ public class NspClient {
 
       if (!response.getStatusCode().is2xxSuccessful()) {
         throw new IllegalStateException(
-            "NSP create subscription failed on host=" + selectedHost + ": "
-                + response.getStatusCode() + " body=" + response.getBody()
+            "NSP create subscription failed on host=" + selectedHost
+                + ": " + response.getStatusCode()
+                + " body=" + response.getBody()
         );
       }
 
@@ -625,10 +687,12 @@ public class NspClient {
       String subscriptionId = root.at("/response/data/subscriptionId").asText(null);
       String topicId = root.at("/response/data/topicId").asText(null);
 
-      if (subscriptionId == null || subscriptionId.isBlank() || topicId == null || topicId.isBlank()) {
+      if (subscriptionId == null || subscriptionId.isBlank()
+          || topicId == null || topicId.isBlank()) {
         throw new IllegalStateException(
             "Could not extract subscriptionId/topicId from create response on host="
-                + selectedHost + ": " + response.getBody()
+                + selectedHost
+                + ": " + response.getBody()
         );
       }
 
@@ -651,10 +715,11 @@ public class NspClient {
    * Renew an existing subscription on the host where it was created.
    *
    * Important:
-   * We do NOT fail over renew to the other NSP site, because a subscription created
-   * on Site A may not exist on Site B. If renew fails, NspSubscriptionManager should
-   * recreate the subscription. Recreate will use failover and may create it on the
-   * other site.
+   * We do not fail over renew to the other NSP site, because a subscription
+   * created on Site A may not exist on Site B.
+   *
+   * If renew fails, NspSubscriptionManager should recreate the subscription.
+   * Recreate uses failover and may create it on the other site.
    */
   public void renewSubscription(String subscriptionId, String hostForSubscription) throws Exception {
     if (subscriptionId == null || subscriptionId.isBlank()) {
@@ -678,6 +743,7 @@ public class NspClient {
     headers.setAccept(List.of(MediaType.valueOf(accept)));
 
     HttpEntity<String> request = new HttpEntity<>("", headers);
+
     ResponseEntity<String> response = restTemplate.exchange(
         URI.create(url),
         HttpMethod.POST,
@@ -687,19 +753,73 @@ public class NspClient {
 
     if (!response.getStatusCode().is2xxSuccessful()) {
       throw new IllegalStateException(
-          "NSP renew subscription failed on host=" + selectedHost + ": "
-              + response.getStatusCode() + " body=" + response.getBody()
+          "NSP renew subscription failed on host=" + selectedHost
+              + ": " + response.getStatusCode()
+              + " body=" + response.getBody()
       );
     }
 
-    log.info("NSP subscription renewed: host={}, subscriptionId={}", selectedHost, subscriptionId);
+    log.info("NSP subscription renewed: host={}, subscriptionId={}",
+        selectedHost, subscriptionId);
+  }
+
+  /**
+   * Delete an existing subscription from the host where it was created.
+   *
+   * This is best-effort cleanup. If NSP does not support DELETE in your version,
+   * the caller may safely ignore failures and continue creating a new subscription.
+   */
+  public void deleteSubscription(String subscriptionId, String hostForSubscription) throws Exception {
+    if (subscriptionId == null || subscriptionId.isBlank()) {
+      throw new IllegalArgumentException("subscriptionId is blank");
+    }
+
+    String selectedHost = (hostForSubscription == null || hostForSubscription.isBlank())
+        ? siteSelector.activeHost()
+        : hostForSubscription.trim();
+
+    String token = getAccessToken(selectedHost);
+
+    String url = baseUrl(selectedHost) + subscriptionsPath + "/" + subscriptionId;
+    log.info("NSP delete subscription URL: {}", url);
+
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(token);
+    headers.setAccept(List.of(MediaType.valueOf(accept)));
+
+    HttpEntity<Void> request = new HttpEntity<>(headers);
+
+    ResponseEntity<String> response = restTemplate.exchange(
+        URI.create(url),
+        HttpMethod.DELETE,
+        request,
+        String.class
+    );
+
+    if (!response.getStatusCode().is2xxSuccessful()) {
+      throw new IllegalStateException(
+          "NSP delete subscription failed on host=" + selectedHost
+              + ": " + response.getStatusCode()
+              + " body=" + response.getBody()
+      );
+    }
+
+    log.info("NSP subscription deleted. host={}, subscriptionId={}",
+        selectedHost, subscriptionId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // DTOs
   // ─────────────────────────────────────────────────────────────────────────
 
-  public record SubscriptionInfo(String subscriptionId, String topicId, String host) {}
+  public record SubscriptionInfo(
+      String subscriptionId,
+      String topicId,
+      String host
+  ) {}
 
-  private record PageData(List<JsonNode> events, long minCursor) {}
+  private record PageData(
+      List<JsonNode> events,
+      long minCursor
+  ) {}
 }

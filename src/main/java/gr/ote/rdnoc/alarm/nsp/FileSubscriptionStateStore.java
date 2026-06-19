@@ -36,7 +36,7 @@ public class FileSubscriptionStateStore implements SubscriptionStateStore {
       if (data.length == 0) return Optional.empty();
 
       return Optional.of(mapper.readValue(data, NspSubscriptionState.class));
-    } catch (Exception e) {
+    } catch (IOException | RuntimeException e) {
       log.warn("Failed to load subscription state from {}", file, e);
       return Optional.empty();
     }
