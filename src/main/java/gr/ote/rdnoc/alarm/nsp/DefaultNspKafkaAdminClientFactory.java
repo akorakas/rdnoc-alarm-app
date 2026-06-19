@@ -5,65 +5,54 @@ import java.util.Map;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.springframework.beans.factory.annotation.Value;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.stereotype.Component;
 
 @Component
 public class DefaultNspKafkaAdminClientFactory implements NspKafkaAdminClientFactory {
 
-  private final String securityProtocol;
-  private final String truststoreLocation;
-  private final String truststorePassword;
-  private final String truststoreType;
-  private final String keystoreLocation;
-  private final String keystorePassword;
-  private final String keystoreType;
-  private final String keyPassword;
+  private final KafkaProperties kafkaProperties;
 
-  public DefaultNspKafkaAdminClientFactory(
-      @Value("${spring.kafka.properties.security.protocol:}") String securityProtocol,
-      @Value("${spring.kafka.properties.ssl.truststore.location:}") String truststoreLocation,
-      @Value("${spring.kafka.properties.ssl.truststore.password:}") String truststorePassword,
-      @Value("${spring.kafka.properties.ssl.truststore.type:}") String truststoreType,
-      @Value("${spring.kafka.properties.ssl.keystore.location:}") String keystoreLocation,
-      @Value("${spring.kafka.properties.ssl.keystore.password:}") String keystorePassword,
-      @Value("${spring.kafka.properties.ssl.keystore.type:}") String keystoreType,
-      @Value("${spring.kafka.properties.ssl.key.password:}") String keyPassword
-  ) {
-    this.securityProtocol = securityProtocol;
-    this.truststoreLocation = truststoreLocation;
-    this.truststorePassword = truststorePassword;
-    this.truststoreType = truststoreType;
-    this.keystoreLocation = keystoreLocation;
-    this.keystorePassword = keystorePassword;
-    this.keystoreType = keystoreType;
-    this.keyPassword = keyPassword;
+  public DefaultNspKafkaAdminClientFactory(KafkaProperties kafkaProperties) {
+    this.kafkaProperties = kafkaProperties;
   }
 
   @Override
   public AdminClient create(String bootstrapServers) {
-    Map<String, Object> props = new HashMap<>();
+    if (bootstrapServers == null || bootstrapServers.isBlank()) {
+      throw new IllegalArgumentException("bootstrapServers is blank");
+    }
 
-    props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+    /*
+     * Important:
+     * Build from spring.kafka.consumer.* because NSP input Kafka uses the
+     * consumer-side SSL/truststore settings.
+     *
+     * Then override only bootstrap.servers because failover decides which
+     * NSP Kafka site to use at runtime.
+     */
+    Map<String, Object> props = new HashMap<>(
+        kafkaProperties.buildConsumerProperties(null)
+    );
+
+    props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers.trim());
     props.put(AdminClientConfig.CLIENT_ID_CONFIG, "rdnoc-nsp-input-admin");
 
-    putIfPresent(props, "security.protocol", securityProtocol);
-
-    putIfPresent(props, "ssl.truststore.location", truststoreLocation);
-    putIfPresent(props, "ssl.truststore.password", truststorePassword);
-    putIfPresent(props, "ssl.truststore.type", truststoreType);
-
-    putIfPresent(props, "ssl.keystore.location", keystoreLocation);
-    putIfPresent(props, "ssl.keystore.password", keystorePassword);
-    putIfPresent(props, "ssl.keystore.type", keystoreType);
-    putIfPresent(props, "ssl.key.password", keyPassword);
+    /*
+     * AdminClient does not need deserializers/group settings.
+     * They are harmless, but removing them avoids confusing Kafka logs.
+     */
+    props.remove(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG);
+    props.remove(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG);
+    props.remove(ConsumerConfig.GROUP_ID_CONFIG);
+    props.remove(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
+    props.remove(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG);
+    props.remove(ConsumerConfig.MAX_POLL_RECORDS_CONFIG);
+    props.remove(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG);
+    props.remove(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG);
+    props.remove(ConsumerConfig.ISOLATION_LEVEL_CONFIG);
 
     return AdminClient.create(props);
-  }
-
-  private void putIfPresent(Map<String, Object> props, String key, String value) {
-    if (value != null && !value.isBlank()) {
-      props.put(key, value);
-    }
   }
 }
