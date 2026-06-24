@@ -672,7 +672,7 @@ public class UnifiedEventMapper {
 
     try {
       return Integer.parseInt(s.trim());
-    } catch (Exception ignore) {
+    } catch (NumberFormatException ignore) {
       return null;
     }
   }
@@ -942,7 +942,7 @@ public class UnifiedEventMapper {
     if (v.isTextual()) {
       try {
         return Long.parseLong(v.asText().trim());
-      } catch (Exception ignore) {
+      } catch (NumberFormatException ignore) {
         // ignore
       }
     }
@@ -967,7 +967,7 @@ public class UnifiedEventMapper {
       try {
         double d = Double.parseDouble(t);
         return normalizeToMillis(d);
-      } catch (Exception ignore) {
+      } catch (NumberFormatException ignore) {
         // ignore
       }
     }
@@ -1148,7 +1148,7 @@ public class UnifiedEventMapper {
 
       try {
         return Long.parseLong(s.trim());
-      } catch (Exception ignore) {
+      } catch (NumberFormatException ignore) {
         return null;
       }
     }
@@ -1174,7 +1174,7 @@ public class UnifiedEventMapper {
 
       try {
         return Integer.parseInt(s.trim());
-      } catch (Exception ignore) {
+      } catch (NumberFormatException ignore) {
         return null;
       }
     }

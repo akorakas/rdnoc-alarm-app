@@ -26,7 +26,6 @@ public class Transformer {
 
   private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
 
-  private final UnifiedEventMapper unifiedEventMapper;
   private final List<TransformStep> steps;
 
   public Transformer(String placeholder,
@@ -34,7 +33,6 @@ public class Transformer {
                      RedisAlarmInstanceCorrelator tnmsCorrelator,
                      UnifiedEventMapper unifiedEventMapper) {
 
-    this.unifiedEventMapper = unifiedEventMapper;
     this.steps = buildSteps(placeholder, pipeline, tnmsCorrelator, unifiedEventMapper);
   }
 

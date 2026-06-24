@@ -44,8 +44,6 @@ public class SyncCoordinator {
     headers.put("reason", reason);
     headers.put("sourceEms", syncMarkerProperties.getSourceEms().name());
 
-    boolean syncStarted = false;
-
     try {
       /*
        * 1) SYNC_START marker.
@@ -66,7 +64,6 @@ public class SyncCoordinator {
         );
 
         sinks.sendOutput(null, syncStart, headers);
-        syncStarted = true;
 
         log.info(
             "Sync: sent SYNC_START. sourceEms={}, vendor={}, domain={}, reason={}",
@@ -111,33 +108,31 @@ public class SyncCoordinator {
        *
        * Send SYNC_END only if SYNC_START was successfully sent.
        */
-      if (syncStarted) {
-        try {
-          String syncEnd = syncMarkerFactory.buildSyncEnd(
-              syncMarkerProperties.getSourceEms(),
-              syncMarkerProperties.getEmsVendorId(),
-              syncMarkerProperties.getEmsDomain()
-          );
-
-          sinks.sendOutput(null, syncEnd, headers);
-
-          log.info(
-              "Sync: sent SYNC_END. sourceEms={}, vendor={}, domain={}, reason={}",
-              syncMarkerProperties.getSourceEms(),
-              syncMarkerProperties.getEmsVendorId(),
-              syncMarkerProperties.getEmsDomain(),
-              reason
-          );
-
-        } catch (Exception e) {
-          log.error(
-              "Sync: failed to build/send SYNC_END. sourceEms={}, reason={}",
-              syncMarkerProperties.getSourceEms(),
-              reason,
-              e
-          );
-        }
-      }
+      try {
+        String syncEnd = syncMarkerFactory.buildSyncEnd(
+            syncMarkerProperties.getSourceEms(),
+            syncMarkerProperties.getEmsVendorId(),
+            syncMarkerProperties.getEmsDomain()
+        );
+      
+        sinks.sendOutput(null, syncEnd, headers);
+      
+        log.info(
+            "Sync: sent SYNC_END. sourceEms={}, vendor={}, domain={}, reason={}",
+            syncMarkerProperties.getSourceEms(),
+            syncMarkerProperties.getEmsVendorId(),
+            syncMarkerProperties.getEmsDomain(),
+            reason
+        );
+      
+      } catch (Exception e) {
+        log.error(
+            "Sync: failed to build/send SYNC_END. sourceEms={}, reason={}",
+            syncMarkerProperties.getSourceEms(),
+            reason,
+            e
+        );
+      }	  
 
     } finally {
       running.set(false);

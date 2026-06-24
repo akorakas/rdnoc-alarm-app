@@ -6,6 +6,7 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
@@ -99,7 +100,7 @@ public class SyncMarkerFactory {
 
       return M.writeValueAsString(u);
 
-    } catch (Exception e) {
+    } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to build NSP sync marker " + type, e);
     }
   }
@@ -149,7 +150,7 @@ public class SyncMarkerFactory {
 
       return M.writeValueAsString(u);
 
-    } catch (Exception e) {
+    } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to build MV36 sync marker " + type, e);
     }
   }
@@ -188,7 +189,7 @@ public class SyncMarkerFactory {
 
       return M.writeValueAsString(u);
 
-    } catch (Exception e) {
+    } catch (JsonProcessingException e) {
       throw new RuntimeException(
           "Failed to build generic sync marker " + type + " for " + sourceEms,
           e
