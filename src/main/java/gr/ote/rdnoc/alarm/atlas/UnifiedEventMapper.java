@@ -51,6 +51,10 @@ public class UnifiedEventMapper {
   // If timezone is not provided in the payload, we assume this default zone.
   private static final ZoneId MV36_DEFAULT_ZONE = ZoneId.of("Europe/Athens");
 
+  // 1350 OMS eventTime: "yyyyMMddHHmmss" without timezone.
+  // Use Athens unless you confirm that 1350 OMS sends UTC.
+  private static final ZoneId OMS1350_DEFAULT_ZONE = ZoneId.of("Europe/Athens");
+
   public UnifiedEventMapper(ObjectProvider<Mv36NeEnrichmentService> enrichmentProvider) {
     this.mv36NeEnrichmentService = enrichmentProvider.getIfAvailable();
 
@@ -109,6 +113,11 @@ public class UnifiedEventMapper {
     boolean isExaGrid  = sourceEms == EMSId.EXAGRID;
     boolean isTnms     = sourceEms == EMSId.INFINERA_TNMS;
     boolean isMv36     = sourceEms == EMSId.MV36_MOBILE;
+    boolean isOms1350  =
+        sourceEms == EMSId.NOKIA_1350_EML1
+            || sourceEms == EMSId.NOKIA_1350_EML2
+            || sourceEms == EMSId.NOKIA_1350_OTNE
+            || sourceEms == EMSId.NOKIA_1350_PKT;
     boolean isNfmT     = sourceEms == EMSId.NOKIA_NFM_T;
 
     // ------------------------------------------------------------------
@@ -116,8 +125,9 @@ public class UnifiedEventMapper {
     //   - EXAGRID
     //   - INFINERA_TNMS
     //   - MV36_MOBILE
+    //   - NOKIA_1350_EML1 / EML2 / OTNE / PKT
     // ------------------------------------------------------------------
-    if (isTelegraf && (isExaGrid || isTnms || isMv36)) {
+    if (isTelegraf && (isExaGrid || isTnms || isMv36 || isOms1350)) {
 
       ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode, isMv36));
 
@@ -126,6 +136,9 @@ public class UnifiedEventMapper {
 
       } else if (isMv36) {
         applyMv36MobileMapping(ue, sourceEventNode, tsMs, eventTime, emsDomainRaw);
+
+      } else if (isOms1350) {
+        applyOms1350Mapping(ue, sourceEventNode, tsMs, eventTime, emsDomainRaw);
 
       } else {
         // INFINERA_TNMS and future Telegraf-based non-ExaGrid flows.
@@ -235,7 +248,7 @@ public class UnifiedEventMapper {
       ue.setEnrichedData(ed);
     }
 
-    // metadata
+    // metadata from context can override only if present.
     Object mdObj = ctx.get("metadata");
     if (mdObj instanceof Map<?, ?> m) {
       @SuppressWarnings("unchecked")
@@ -681,14 +694,14 @@ public class UnifiedEventMapper {
     if (fields == null || !fields.isObject() || prefix == null) {
       return null;
     }
-  
+
     for (Map.Entry<String, JsonNode> e : fields.properties()) {
       if (e.getKey().startsWith(prefix)) {
         JsonNode value = e.getValue();
         return value == null || value.isNull() ? null : value.asText();
       }
     }
-  
+
     return null;
   }
 
@@ -767,6 +780,103 @@ public class UnifiedEventMapper {
     }
 
     return out;
+  }
+
+  // ============================================================================================
+  // NOKIA / ALCATEL 1350 OMS mapping
+  // ============================================================================================
+
+  private void applyOms1350Mapping(
+      UnifiedEvent ue,
+      JsonNode sourceEventNode,
+      Long ctxTsMs,
+      String eventTimeFromCtx,
+      String emsDomainRaw
+  ) {
+    JsonNode fields = sourceEventNode != null ? sourceEventNode.get("fields") : null;
+    JsonNode tags   = sourceEventNode != null ? sourceEventNode.get("tags") : null;
+
+    String trapName = getText(tags, "name");
+    String trapOid  = getText(tags, "oid");
+
+    String currentAlarmId = getText(fields, "currentAlarmId");
+    String eventTime      = getText(fields, "eventTime");
+    String friendlyName   = getText(fields, "friendlyName");
+    String perceivedSev   = getText(fields, "perceivedSeverity");
+    String probableCause  = getText(fields, "probableCause");
+
+    boolean isClear =
+        "alarmHandoffTraps.0.2".equals(trapName)
+            || ".1.3.6.1.4.1.637.65.1.1.2.0.2".equals(trapOid);
+
+    ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode, false));
+
+    ue.setEmsDomain(parseEnumOrDefault(
+        EMSDomain.class,
+        emsDomainRaw,
+        EMSDomain.TRANSPORT
+    ));
+
+    ue.setType(isClear ? EventType.CLEAR : EventType.FAULT);
+    ue.setSeverity(isClear ? Severity.CLEARED : mapSeverity(perceivedSev));
+
+    Long omsTsMs = oms1350EventTimeToEpochMs(eventTime);
+
+    ue.setTimestamp(parseEventTime(
+        firstNonNull(omsTsMs, ctxTsMs),
+        eventTimeFromCtx
+    ));
+
+    ue.setSerialNo(clean(currentAlarmId));
+    ue.setFaultId(clean(probableCause));
+
+    String neName = extractOms1350NeName(friendlyName);
+    String neEquipment = extractOms1350NeEquipment(friendlyName);
+
+    ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
+    ue.setNeEquipment(firstNonBlank(neEquipment, ""));
+
+    ue.setAlarmIdentifier(clean(currentAlarmId));
+  }
+
+  private static String extractOms1350NeName(String friendlyName) {
+    String s = clean(friendlyName);
+    if (s == null) return null;
+
+    int slash = s.indexOf('/');
+    if (slash > 0) {
+      return s.substring(0, slash).trim();
+    }
+
+    return s;
+  }
+
+  private static String extractOms1350NeEquipment(String friendlyName) {
+    String s = clean(friendlyName);
+    if (s == null) return "";
+
+    int slash = s.indexOf('/');
+    if (slash > 0 && slash + 1 < s.length()) {
+      return s.substring(slash + 1).trim();
+    }
+
+    return "";
+  }
+
+  private static Long oms1350EventTimeToEpochMs(String eventTime) {
+    if (eventTime == null || eventTime.isBlank()) {
+      return null;
+    }
+
+    try {
+      DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+      LocalDateTime ldt = LocalDateTime.parse(eventTime.trim(), fmt);
+
+      return ldt.atZone(OMS1350_DEFAULT_ZONE).toInstant().toEpochMilli();
+
+    } catch (Exception ignore) {
+      return null;
+    }
   }
 
   // ============================================================================================
