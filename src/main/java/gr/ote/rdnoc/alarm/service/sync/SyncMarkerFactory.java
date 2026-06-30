@@ -66,9 +66,12 @@ public class SyncMarkerFactory {
       return buildNspMarker(type, sourceEms, vendor, domain);
     }
 
-    if (sourceEms == EMSId.MV36_MOBILE) {
+    if (sourceEms == EMSId.MV36_MOBILE
+      || sourceEms == EMSId.MV36_FIXED_A
+      || sourceEms == EMSId.MV36_FIXED_B
+      || sourceEms == EMSId.MV36_FIXED_C) {
       return buildMv36Marker(type, sourceEms, vendor, domain);
-    }
+   }
 
     return buildGenericMarker(type, sourceEms, vendor, domain);
   }

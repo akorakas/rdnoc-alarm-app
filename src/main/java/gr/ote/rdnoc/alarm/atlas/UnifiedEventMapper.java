@@ -112,7 +112,11 @@ public class UnifiedEventMapper {
     boolean isTelegraf = looksLikeTelegraf(sourceEventNode);
     boolean isExaGrid  = sourceEms == EMSId.EXAGRID;
     boolean isTnms     = sourceEms == EMSId.INFINERA_TNMS;
-    boolean isMv36     = sourceEms == EMSId.MV36_MOBILE;
+    boolean isMv36 =
+    sourceEms == EMSId.MV36_MOBILE
+        || sourceEms == EMSId.MV36_FIXED_A
+        || sourceEms == EMSId.MV36_FIXED_B
+        || sourceEms == EMSId.MV36_FIXED_C;
     boolean isOms1350  =
         sourceEms == EMSId.NOKIA_1350_EML1
             || sourceEms == EMSId.NOKIA_1350_EML2
