@@ -370,7 +370,10 @@ public class UnifiedEventMapper {
         getText(fieldNode, "objectFullName")
     );
 
+    String nfmtIdentifier = joinNonBlank("/", effectiveNeEquipment, effectiveFaultId);
+    
     String effectiveAlarmIdentifier = firstNonBlank(
+        nfmtIdentifier,
         alarmIdentifier,
         effectiveObjectFullName,
         getText(fieldNode, "affectedObject"),
