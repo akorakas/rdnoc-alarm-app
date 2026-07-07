@@ -142,7 +142,7 @@ public class UnifiedEventMapper {
         applyMv36MobileMapping(ue, sourceEventNode, tsMs, eventTime, emsDomainRaw);
 
       } else if (isOms1350) {
-        applyOms1350Mapping(ue, sourceEventNode, tsMs, eventTime, emsDomainRaw);
+        applyOms1350Mapping(ue, sourceEms, sourceEventNode, tsMs, eventTime, emsDomainRaw);
 
       } else {
         // INFINERA_TNMS and future Telegraf-based non-ExaGrid flows.
@@ -795,6 +795,7 @@ public class UnifiedEventMapper {
 
   private void applyOms1350Mapping(
       UnifiedEvent ue,
+      EMSId sourceEms,
       JsonNode sourceEventNode,
       Long ctxTsMs,
       String eventTimeFromCtx,
@@ -843,7 +844,17 @@ public class UnifiedEventMapper {
     ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
     ue.setNeEquipment(firstNonBlank(neEquipment, ""));
 
-    ue.setAlarmIdentifier(clean(currentAlarmId));
+    boolean useFriendlyNameProbableCauseIdentifier =
+    sourceEms == EMSId.NOKIA_1350_EML1
+        || sourceEms == EMSId.NOKIA_1350_EML2
+        || sourceEms == EMSId.NOKIA_1350_OTNE;
+
+    if (useFriendlyNameProbableCauseIdentifier) {
+      String identifier = joinNonBlank("/", friendlyName, probableCause);
+      ue.setAlarmIdentifier(firstNonBlank(identifier, currentAlarmId));
+    } else {
+      ue.setAlarmIdentifier(clean(currentAlarmId));
+    }
   }
 
   private static String extractOms1350NeName(String friendlyName) {
