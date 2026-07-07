@@ -841,8 +841,16 @@ public class UnifiedEventMapper {
     String neName = extractOms1350NeName(friendlyName);
     String neEquipment = extractOms1350NeEquipment(friendlyName);
 
-    ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
-    ue.setNeEquipment(firstNonBlank(neEquipment, ""));
+    if (sourceEms == EMSId.NOKIA_1350_OTNE) {
+      // OTNE special mapping:
+      //   neName      <- friendlyName
+      //   neEquipment <- null
+      ue.setNeName(clean(friendlyName));
+      ue.setNeEquipment(null);
+    } else {
+      ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
+      ue.setNeEquipment(firstNonBlank(neEquipment, ""));
+    }
 
     boolean useFriendlyNameProbableCauseIdentifier =
     sourceEms == EMSId.NOKIA_1350_EML1
