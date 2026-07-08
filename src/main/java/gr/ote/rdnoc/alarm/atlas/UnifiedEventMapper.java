@@ -846,7 +846,7 @@ public class UnifiedEventMapper {
       //   neName      <- friendlyName
       //   neEquipment <- null
       ue.setNeName(clean(friendlyName));
-      ue.setNeEquipment(null);
+      ue.setNeEquipment(clean(friendlyName));
     } else {
       ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
       ue.setNeEquipment(firstNonBlank(neEquipment, ""));
