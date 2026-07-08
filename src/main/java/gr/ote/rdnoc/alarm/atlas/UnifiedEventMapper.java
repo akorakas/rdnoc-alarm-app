@@ -847,7 +847,21 @@ public class UnifiedEventMapper {
       //   neEquipment <- null
       ue.setNeName(clean(friendlyName));
       ue.setNeEquipment(clean(friendlyName));
+    } else if (sourceEms == EMSId.NOKIA_1350_EML1
+        || sourceEms == EMSId.NOKIA_1350_EML2) {
+      // EML1 / EML2:
+      //   neName      <- before first "/" in friendlyName
+      //   neEquipment <- after first "/" in friendlyName
+      //
+      // Fallbacks:
+      //   if neName is null      -> friendlyName
+      //   if neEquipment is null -> friendlyName
+      ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
+      ue.setNeEquipment(firstNonBlank(neEquipment, friendlyName));
+
     } else {
+      // PKT and any future 1350 flow:
+      // keep previous behavior
       ue.setNeName(firstNonBlank(neName, friendlyName, getText(tags, "agent_address")));
       ue.setNeEquipment(firstNonBlank(neEquipment, ""));
     }
