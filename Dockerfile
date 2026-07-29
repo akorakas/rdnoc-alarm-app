@@ -1,46 +1,67 @@
 # ====== 1) Build stage ======
-FROM maven:3.9.9-eclipse-temurin-25-alpine AS build
+FROM eclipse-temurin:25-jdk AS build
+
 WORKDIR /workspace
 
-# copy only the pom first (layer caching)
+# Copy Maven Wrapper and POM first for dependency caching
+COPY mvnw .
+COPY .mvn .mvn
 COPY pom.xml .
-RUN mvn -q -e -U -DskipTests dependency:go-offline
 
-# now copy sources and build
+RUN chmod +x mvnw
+
+# Download dependencies
+RUN ./mvnw -B -U -DskipTests dependency:go-offline
+
+# Copy sources and build
 COPY src ./src
-RUN mvn -q -DskipTests clean package
+
+RUN ./mvnw -B -DskipTests clean package
+
+# Copy the executable Spring Boot JAR to a fixed filename
+RUN JAR_FILE="$(find target \
+      -maxdepth 1 \
+      -type f \
+      -name 'rdnoc-alarm-app-*.jar' \
+      ! -name '*.original' \
+      | head -n 1)" \
+    && test -n "$JAR_FILE" \
+    && cp "$JAR_FILE" /workspace/app.jar
+
 
 # ====== 2) Runtime stage ======
-# Use a small JRE image; Temurin is stable
 FROM eclipse-temurin:25-jre
 
-# Install curl just for the healthcheck (then drop to non-root)
 USER root
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
- && rm -rf /var/lib/apt/lists/*
 
-# Create app user (non-root)
-RUN groupadd --system app && useradd --system --create-home --gid app app
-USER app
+# Install curl for the health check
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root application user and config directory
+RUN groupadd --system app \
+    && useradd --system --create-home --gid app app \
+    && mkdir -p /app/config \
+    && chown -R app:app /app
 
 WORKDIR /app
 
-# copy boot fat jar from the build stage
-COPY --from=build /workspace/target/rdnoc-alarm-app-0.0.1-SNAPSHOT.jar /app/app.jar
+COPY --from=build --chown=app:app /workspace/app.jar /app/app.jar
 
-# Optional: Drop in a default config dir (you can mount your own at runtime)
-# COPY src/main/resources/application.yml /app/config/application.yml
+USER app
 
-# JVM + Spring defaults are overridable via env
 ENV JAVA_OPTS="-Xms256m -Xmx512m"
-ENV SPRING_PROFILES_ACTIVE=default
-# If you use a separate management port, expose it too
+ENV SPRING_PROFILES_ACTIVE="default"
+
 EXPOSE 8080
 
-# Basic healthcheck against actuator (remove if not using actuator)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
-  CMD wget -qO- http://localhost:8080/actuator/health | grep '"status":"UP"' || exit 1
+HEALTHCHECK --interval=30s \
+            --timeout=3s \
+            --start-period=20s \
+            --retries=3 \
+  CMD curl -fsS http://localhost:8080/actuator/health \
+      | grep -q '"status":"UP"' \
+      || exit 1
 
-# Let Spring read external config from /app/config (first in search path)
-ENTRYPOINT [ "sh", "-c", "java $JAVA_OPTS -jar /app/app.jar --spring.config.additional-location=file:/app/config/" ]
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar --spring.config.additional-location=optional:file:/app/config/"]
