@@ -110,10 +110,7 @@ app:
 spring:
   jackson:
     deserialization:
-      read-date-timestamps-as-nanoseconds: false
       fail-on-unknown-properties: false
-    serialization:
-      write-dates-as-timestamps: false
 
   kafka:
     consumer:
