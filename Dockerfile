@@ -1,5 +1,5 @@
 # ====== 1) Build stage ======
-FROM maven:3.9.9-eclipse-temurin-25 AS build
+FROM maven:3.9.9-eclipse-temurin-25-alpine AS build
 WORKDIR /workspace
 
 # copy only the pom first (layer caching)
@@ -12,7 +12,7 @@ RUN mvn -q -DskipTests clean package
 
 # ====== 2) Runtime stage ======
 # Use a small JRE image; Temurin is stable
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:25-jre
 
 # Install curl just for the healthcheck (then drop to non-root)
 USER root
