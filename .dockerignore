@@ -1,6 +1,4 @@
 target/
-.mvn/
-.mvn/wrapper/
 .git/
 .gitignore
 .vscode/
