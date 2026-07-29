@@ -1,5 +1,5 @@
 # ====== 1) Build stage ======
-FROM maven:3.9.9-eclipse-temurin-21 AS build
+FROM maven:3.9.9-eclipse-temurin-25 AS build
 WORKDIR /workspace
 
 # copy only the pom first (layer caching)
