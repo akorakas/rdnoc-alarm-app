@@ -3,7 +3,7 @@ package gr.ote.rdnoc.alarm.service.pipeline;
 import java.util.HashMap;
 import java.util.Map;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 public final class TransformContext {
   public final JsonNode root;

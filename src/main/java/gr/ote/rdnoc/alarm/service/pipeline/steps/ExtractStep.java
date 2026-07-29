@@ -5,8 +5,8 @@ import java.util.Map;
 import gr.ote.rdnoc.alarm.service.errors.TransformFailureException;
 import gr.ote.rdnoc.alarm.service.pipeline.TransformContext;
 import gr.ote.rdnoc.alarm.service.pipeline.TransformStep;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Extracts values from JSON into the pipeline context.
@@ -54,7 +54,7 @@ public class ExtractStep implements TransformStep {
       if (v instanceof String s && !s.isBlank()) {
         try {
           source = M.readTree(s);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (tools.jackson.core.JacksonException e) {
           if (failOnBadJson) {
             throw new TransformFailureException(
                 "ExtractStep: fromVar '" + fromVar + "' is not valid JSON", e);
@@ -94,7 +94,7 @@ public class ExtractStep implements TransformStep {
         } else if (n.isBoolean()) {
           val = n.booleanValue();
         } else {
-          val = n.asText();
+          val = n.asString();
         }
       } else {
         // 🔹 object/array → κράτα το ως raw JSON string

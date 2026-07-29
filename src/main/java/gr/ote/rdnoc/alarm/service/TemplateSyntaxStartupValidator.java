@@ -9,7 +9,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import gr.ote.rdnoc.alarm.service.config.TransformProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 
 @Component
 @ConditionalOnProperty(name = "transform.templates.enabled", havingValue = "true", matchIfMissing = false)
@@ -53,7 +53,7 @@ public class TemplateSyntaxStartupValidator implements ApplicationRunner {
 
       try {
         M.readTree(renderedForCheck);
-      } catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+      } catch (tools.jackson.core.JacksonException ex) {
         String preview = renderedForCheck.length() > 400
             ? renderedForCheck.substring(0, 400) + "...(truncated)"
             : renderedForCheck;

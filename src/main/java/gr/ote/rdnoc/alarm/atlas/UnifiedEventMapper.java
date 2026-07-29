@@ -14,9 +14,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
 import gr.ote.atlas.events.emsspecificevents.NokiaNfmTAlarm;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
@@ -30,13 +27,16 @@ import gr.ote.atlas.events.models.UnifiedEvent;
 import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
 import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
 import gr.ote.rdnoc.alarm.service.pipeline.TransformContext;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 @Component
 public class UnifiedEventMapper {
 
   private static final Logger log = LoggerFactory.getLogger(UnifiedEventMapper.class);
 
-  private static final ObjectMapper ENRICHED_DATA_MAPPER = new ObjectMapper().findAndRegisterModules();
+  private static final ObjectMapper ENRICHED_DATA_MAPPER = JsonMapper.builder().build();
 
   private final Mv36NeEnrichmentService mv36NeEnrichmentService;
 
@@ -678,7 +678,7 @@ public class UnifiedEventMapper {
 
     JsonNode exact = fields.get(baseName);
     if (exact != null && !exact.isNull()) {
-      return exact.asText();
+      return exact.asString();
     }
 
     return findFieldTextByPrefix(fields, baseName + ".");
@@ -705,7 +705,7 @@ public class UnifiedEventMapper {
     for (Map.Entry<String, JsonNode> e : fields.properties()) {
       if (e.getKey().startsWith(prefix)) {
         JsonNode value = e.getValue();
-        return value == null || value.isNull() ? null : value.asText();
+        return value == null || value.isNull() ? null : value.asString();
       }
     }
 
@@ -1076,7 +1076,7 @@ public class UnifiedEventMapper {
 
     obj.properties().forEach(e -> out.put(
         e.getKey(),
-        e.getValue().isNull() ? null : e.getValue().asText()
+        e.getValue().isNull() ? null : e.getValue().asString()
     ));
 
     return out;
@@ -1089,9 +1089,9 @@ public class UnifiedEventMapper {
       return v.longValue();
     }
 
-    if (v.isTextual()) {
+    if (v.isString()) {
       try {
-        return Long.parseLong(v.asText().trim());
+        return Long.parseLong(v.asString().trim());
       } catch (NumberFormatException ignore) {
         // ignore
       }
@@ -1115,8 +1115,7 @@ public class UnifiedEventMapper {
       }
 
       try {
-        double d = Double.parseDouble(t);
-        return normalizeToMillis(d);
+        return normalizeToMillis(Double.parseDouble(t));
       } catch (NumberFormatException ignore) {
         // ignore
       }
@@ -1157,7 +1156,7 @@ public class UnifiedEventMapper {
 
     JsonNode v = n.get(field);
 
-    return (v == null || v.isNull()) ? null : v.asText();
+    return (v == null || v.isNull()) ? null : v.asString();
   }
 
   private static Long getLong(JsonNode n, String field) {
@@ -1182,18 +1181,18 @@ public class UnifiedEventMapper {
     if (v.isObject()) {
       JsonNode newValue = v.get("new-value");
       if (newValue != null && !newValue.isNull()) {
-        return newValue.asText();
+        return newValue.asString();
       }
 
       JsonNode oldValue = v.get("old-value");
       if (oldValue != null && !oldValue.isNull()) {
-        return oldValue.asText();
+        return oldValue.asString();
       }
 
       return v.toString();
     }
 
-    return v.asText();
+    return v.asString();
   }
 
   private static Long readLongOrNewValue(JsonNode node, String field) {
@@ -1289,47 +1288,47 @@ public class UnifiedEventMapper {
       return v.asLong();
     }
 
-    if (v.isTextual()) {
-      String s = v.asText();
-
-      if (s == null || s.isBlank()) {
-        return null;
-      }
-
-      try {
-        return Long.parseLong(s.trim());
-      } catch (NumberFormatException ignore) {
-        return null;
-      }
+    if (!v.isString()) {
+      return null;
     }
 
-    return null;
+    String value = v.asString();
+
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+
+    try {
+      return Long.valueOf(value.trim());
+    } catch (NumberFormatException ignore) {
+      return null;
+    }
   }
 
   private static Integer jsonNodeToInt(JsonNode v) {
     if (v == null || v.isNull()) {
-      return null;
-    }
-
+    return null;
+  }
+  
     if (v.isNumber()) {
       return v.asInt();
     }
-
-    if (v.isTextual()) {
-      String s = v.asText();
-
-      if (s == null || s.isBlank()) {
-        return null;
-      }
-
-      try {
-        return Integer.parseInt(s.trim());
-      } catch (NumberFormatException ignore) {
-        return null;
-      }
+  
+    if (!v.isString()) {
+      return null;
     }
-
-    return null;
+  
+    String value = v.asString();
+  
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+  
+    try {
+      return Integer.valueOf(value.trim());
+    } catch (NumberFormatException ignore) {
+      return null;
+    }
   }
 
   private static Boolean jsonNodeToBoolean(JsonNode v) {
@@ -1341,8 +1340,8 @@ public class UnifiedEventMapper {
       return v.asBoolean();
     }
 
-    if (v.isTextual()) {
-      String s = v.asText();
+    if (v.isString()) {
+      String s = v.asString();
 
       if (s == null || s.isBlank()) {
         return null;

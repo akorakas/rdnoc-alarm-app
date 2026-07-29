@@ -8,8 +8,8 @@ import java.util.Optional;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
 import gr.ote.atlas.events.enums.EMSDomain;
 import gr.ote.atlas.events.enums.EMSId;
@@ -30,7 +30,7 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 public class Mv36ActiveAlarmMapper {
 
-  private static final ObjectMapper ENRICHED_DATA_MAPPER = new ObjectMapper().findAndRegisterModules();
+  private static final ObjectMapper ENRICHED_DATA_MAPPER = JsonMapper.builder().build();
 
   private final Mv36SnmpProperties props;
   private final org.springframework.beans.factory.ObjectProvider<Mv36NeEnrichmentService> neEnrichmentServiceProvider;

@@ -4,8 +4,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import gr.ote.rdnoc.alarm.atlas.UnifiedEventMapper;
 import gr.ote.rdnoc.alarm.correlate.RedisAlarmInstanceCorrelator;
 import gr.ote.rdnoc.alarm.service.config.TransformProperties;
@@ -24,7 +25,7 @@ import gr.ote.rdnoc.alarm.service.pipeline.steps.UpdateStep;
 
 public class Transformer {
 
-  private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
+  private static final ObjectMapper M = JsonMapper.builder().build();
 
   private final List<TransformStep> steps;
 
@@ -41,13 +42,14 @@ public class Transformer {
       var root = M.readTree(inputJson);
       var ctx = new TransformContext(root);
 
-      for (var s : steps) {
+      for (var step : steps) {
         try {
-          s.apply(ctx);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-          throw new TransformFailureException("Step JSON processing failed", e);
-        } catch (java.io.IOException e) {
-          throw new TransformFailureException("Step IO failed", e);
+          step.apply(ctx);
+        } catch (JacksonException e) {
+          throw new TransformFailureException(
+              "Step JSON processing failed",
+              e
+          );
         } catch (IllegalArgumentException | IllegalStateException e) {
           throw new TransformFailureException(e.getMessage(), e);
         } catch (Exception e) {
@@ -55,9 +57,9 @@ public class Transformer {
         }
       }
 
-      return (ctx.rendered != null) ? ctx.rendered : inputJson;
+      return ctx.rendered != null ? ctx.rendered : inputJson;
 
-    } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new BadInputException("Input is not valid JSON", e);
     }
   }

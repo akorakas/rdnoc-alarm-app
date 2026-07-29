@@ -8,7 +8,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
@@ -172,7 +172,7 @@ public class DynamicKafkaConsumer {
       return defaultConsumerFactory;
     }
 
-    Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties(null));
+    Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties());
     props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
 
     return new DefaultKafkaConsumerFactory<>(props);
@@ -183,7 +183,7 @@ public class DynamicKafkaConsumer {
       return bootstrapServers.trim();
     }
 
-    Object configured = kafkaProperties.buildConsumerProperties(null)
+    Object configured = kafkaProperties.buildConsumerProperties()
         .get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG);
 
     return configured == null ? null : configured.toString();

@@ -6,7 +6,7 @@ import java.util.Map;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -33,7 +33,7 @@ public class DefaultNspKafkaAdminClientFactory implements NspKafkaAdminClientFac
      * NSP Kafka site to use at runtime.
      */
     Map<String, Object> props = new HashMap<>(
-        kafkaProperties.buildConsumerProperties(null)
+        kafkaProperties.buildConsumerProperties()
     );
 
     props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers.trim());

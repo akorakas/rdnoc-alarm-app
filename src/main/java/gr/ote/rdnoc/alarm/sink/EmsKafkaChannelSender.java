@@ -6,8 +6,8 @@ import java.util.Map;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.springframework.kafka.core.KafkaTemplate;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import gr.ote.atlas.events.enums.EMSId;
 
@@ -32,7 +32,7 @@ public class EmsKafkaChannelSender implements ChannelSender {
     try {
       if (payload != null && !payload.isBlank()) {
         JsonNode root = om.readTree(payload);
-        String sourceEms = root.path("sourceEms").asText(null);
+        String sourceEms = root.path("sourceEms").asString(null);
 
         if (sourceEms != null && !sourceEms.isBlank()) {
           key = sourceEms;

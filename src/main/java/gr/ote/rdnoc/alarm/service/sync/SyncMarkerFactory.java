@@ -6,9 +6,9 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
 import gr.ote.atlas.events.enums.EMSDomain;
@@ -23,7 +23,7 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class SyncMarkerFactory {
 
-  private static final ObjectMapper M = new ObjectMapper().findAndRegisterModules();
+  private static final ObjectMapper M = JsonMapper.builder().build();
 
   /**
    * Backward-compatible methods.
@@ -103,7 +103,7 @@ public class SyncMarkerFactory {
 
       return M.writeValueAsString(u);
 
-    } catch (JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new RuntimeException("Failed to build NSP sync marker " + type, e);
     }
   }
@@ -153,7 +153,7 @@ public class SyncMarkerFactory {
 
       return M.writeValueAsString(u);
 
-    } catch (JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new RuntimeException("Failed to build MV36 sync marker " + type, e);
     }
   }
@@ -192,7 +192,7 @@ public class SyncMarkerFactory {
 
       return M.writeValueAsString(u);
 
-    } catch (JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new RuntimeException(
           "Failed to build generic sync marker " + type + " for " + sourceEms,
           e

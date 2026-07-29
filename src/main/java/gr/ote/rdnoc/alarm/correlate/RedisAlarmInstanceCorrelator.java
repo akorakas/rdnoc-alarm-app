@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 
 import gr.ote.rdnoc.alarm.service.config.CorrelationProperties;
 import gr.ote.rdnoc.alarm.service.config.CorrelationProperties.KeyPart;
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 import gr.ote.atlas.events.enums.EMSId;
 import gr.ote.atlas.events.enums.EventType;
@@ -123,7 +123,7 @@ public class RedisAlarmInstanceCorrelator {
 
       JsonNode n = sourceEventNode.at(ptr.trim());
       if (n == null || n.isMissingNode() || n.isNull()) return null;
-      String v = n.asText();
+      String v = n.asString();
       return (v == null || v.isBlank()) ? null : v;
     }
 

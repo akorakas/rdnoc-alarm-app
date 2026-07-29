@@ -20,7 +20,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
@@ -35,7 +35,7 @@ public class RequireTopics {
   /** Admin client for the INPUT cluster (built from spring.kafka.consumer.*) */
   @Bean(name = "inputAdminClient", destroyMethod = "close")
   public AdminClient inputAdminClient(KafkaProperties props) {
-    Map<String, Object> cfg = new HashMap<>(props.buildConsumerProperties(null));
+    Map<String, Object> cfg = new HashMap<>(props.buildConsumerProperties());
     return AdminClient.create(cfg);
   }
 

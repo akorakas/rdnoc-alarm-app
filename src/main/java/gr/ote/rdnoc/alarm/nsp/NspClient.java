@@ -19,9 +19,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
-import com.fasterxml.jackson.core.JsonPointer;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JsonPointer;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -253,7 +253,7 @@ public class NspClient {
     }
 
     JsonNode json = objectMapper.readTree(response.getBody());
-    String accessToken = json.path("access_token").asText(null);
+    String accessToken = json.path("access_token").asString(null);
     int expiresIn = json.path("expires_in").asInt(600);
 
     if (accessToken == null || accessToken.isBlank()) {
@@ -524,7 +524,7 @@ public class NspClient {
       return node.asLong(-1);
     }
 
-    String value = node.asText("");
+    String value = node.asString("");
 
     try {
       return Long.parseLong(value);
@@ -549,7 +549,7 @@ public class NspClient {
       JsonNode value = alarm.get(candidate);
 
       if (value != null && !value.isNull()) {
-        String text = value.asText("").trim();
+        String text = value.asString("").trim();
 
         if (!text.isEmpty()) {
           return candidate + ":" + text;
@@ -557,8 +557,8 @@ public class NspClient {
       }
     }
 
-    String alarmName = alarm.path("alarmName").asText("");
-    String affectedObjectName = alarm.path("affectedObjectName").asText("");
+    String alarmName = alarm.path("alarmName").asString("");
+    String affectedObjectName = alarm.path("affectedObjectName").asString("");
     long detectedTime = readCursorValue(alarm);
 
     return "fallback:" + alarmName + "|" + affectedObjectName + "|" + detectedTime;
@@ -684,8 +684,8 @@ public class NspClient {
       }
 
       JsonNode root = objectMapper.readTree(response.getBody());
-      String subscriptionId = root.at("/response/data/subscriptionId").asText(null);
-      String topicId = root.at("/response/data/topicId").asText(null);
+      String subscriptionId = root.at("/response/data/subscriptionId").asString(null);
+      String topicId = root.at("/response/data/topicId").asString(null);
 
       if (subscriptionId == null || subscriptionId.isBlank()
           || topicId == null || topicId.isBlank()) {

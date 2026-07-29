@@ -5,9 +5,9 @@ import java.util.Map;
 
 import gr.ote.rdnoc.alarm.service.pipeline.TransformContext;
 import gr.ote.rdnoc.alarm.service.pipeline.TransformStep;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 public class FlattenStep implements TransformStep {
   private static final ObjectMapper M = new ObjectMapper();

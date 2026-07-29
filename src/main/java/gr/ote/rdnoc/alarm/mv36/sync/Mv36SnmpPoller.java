@@ -1,6 +1,5 @@
 package gr.ote.rdnoc.alarm.mv36.sync;
 
-import java.io.IOException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -8,11 +7,13 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.core.JsonGenerator;
-import com.fasterxml.jackson.databind.JsonSerializer;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializerProvider;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonGenerator;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.SerializationContext;
+import tools.jackson.databind.ValueSerializer;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.module.SimpleModule;
 
 import gr.ote.atlas.events.models.UnifiedEvent;
 import gr.ote.rdnoc.alarm.mv36.mapper.Mv36ActiveAlarmMapper;
@@ -34,26 +35,34 @@ public class Mv36SnmpPoller {
   private static final ObjectMapper EVENT_OBJECT_MAPPER = buildEventObjectMapper();
 
   private static ObjectMapper buildEventObjectMapper() {
-    JavaTimeModule javaTimeModule = new JavaTimeModule();
-
-    javaTimeModule.addSerializer(Instant.class, new JsonSerializer<Instant>() {
+    SimpleModule module = new SimpleModule();
+  
+    module.addSerializer(Instant.class, new ValueSerializer<Instant>() {
       @Override
-      public void serialize(Instant value, JsonGenerator gen, SerializerProvider serializers) throws IOException {
-        if (value == null) {
-          gen.writeNull();
-          return;
-        }
+      public void serialize(
+          Instant value,
+          JsonGenerator generator,
+          SerializationContext context
+      ) throws JacksonException {
 
-        String numericTimestamp = value.getEpochSecond() + "." + String.format("%09d", value.getNano());
-        gen.writeRawValue(numericTimestamp);
+        String numericTimestamp =
+            value.getEpochSecond()
+                + "."
+                + String.format("%09d", value.getNano());
+
+        /*
+         * Preserve your existing output format as an unquoted
+         * numeric JSON value, for example:
+         *
+         * 1785319341.123456789
+         */
+        generator.writeRawValue(numericTimestamp);
       }
     });
 
-    ObjectMapper mapper = new ObjectMapper();
-    mapper.registerModule(javaTimeModule);
-    mapper.findAndRegisterModules();
-
-    return mapper;
+    return JsonMapper.builder()
+        .addModule(module)
+        .build();
   }
 
   public void fetchAndPublishActiveAlarmsOnce() throws Exception {

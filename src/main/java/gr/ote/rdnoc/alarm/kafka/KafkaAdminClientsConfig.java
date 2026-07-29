@@ -6,7 +6,7 @@ import java.util.Map;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -19,7 +19,7 @@ public class KafkaAdminClientsConfig {
    */
   @Bean(name = "outputAdminClient", destroyMethod = "close")
   public AdminClient outputAdminClient(KafkaProperties kafkaProperties) {
-    Map<String, Object> cfg = new HashMap<>(kafkaProperties.buildProducerProperties(null));
+    Map<String, Object> cfg = new HashMap<>(kafkaProperties.buildProducerProperties());
     cfg.putIfAbsent(AdminClientConfig.CLIENT_ID_CONFIG, "kafka-app-output-admin");
     return AdminClient.create(cfg);
   }
