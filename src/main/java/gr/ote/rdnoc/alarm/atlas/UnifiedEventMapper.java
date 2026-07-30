@@ -206,7 +206,7 @@ public class UnifiedEventMapper {
       // ------------------------------------------------------------------
       ue.setEmsDomain(mapDomain(firstNonBlank(emsDomainRaw, getText(sourceEventNode, "sourceType"))));
       ue.setType(mapEventType(typeStr));
-      ue.setSeverity(mapSeverity(firstNonBlank(sevStr, getText(sourceEventNode, "severity"))));
+      ue.setSeverity(mapSeverity(firstNonBlank(sevStr, readTextOrNewValue(sourceEventNode, "severity"))));
       ue.setTimestamp(parseEventTime(tsMs, eventTime));
 
       ue.setSerialNo(firstNonBlank(serialNo, getText(sourceEventNode, "objectId")));
@@ -1152,11 +1152,43 @@ public class UnifiedEventMapper {
   }
 
   private static String getText(JsonNode n, String field) {
-    if (n == null) return null;
+    if (n == null || field == null) {
+      return null;
+    }
 
     JsonNode v = n.get(field);
 
-    return (v == null || v.isNull()) ? null : v.asString();
+    if (v == null || v.isNull()) {
+      return null;
+    }
+
+    if (v.isString() || v.isNumber() || v.isBoolean()) {
+      return v.asString();
+    }
+
+    if (v.isObject()) {
+      JsonNode newValue = v.get("new-value");
+
+      if (newValue != null
+          && !newValue.isNull()
+          && (newValue.isString()
+              || newValue.isNumber()
+              || newValue.isBoolean())) {
+        return newValue.asString();
+      }
+
+      JsonNode oldValue = v.get("old-value");
+
+      if (oldValue != null
+          && !oldValue.isNull()
+          && (oldValue.isString()
+              || oldValue.isNumber()
+              || oldValue.isBoolean())) {
+        return oldValue.asString();
+      }
+    }
+
+    return null;
   }
 
   private static Long getLong(JsonNode n, String field) {
@@ -1171,28 +1203,42 @@ public class UnifiedEventMapper {
     if (node == null || field == null) {
       return null;
     }
-
+  
     JsonNode v = node.get(field);
-
+  
     if (v == null || v.isNull()) {
       return null;
     }
-
+  
     if (v.isObject()) {
       JsonNode newValue = v.get("new-value");
-      if (newValue != null && !newValue.isNull()) {
+    
+      if (newValue != null
+          && !newValue.isNull()
+          && (newValue.isString()
+              || newValue.isNumber()
+              || newValue.isBoolean())) {
         return newValue.asString();
       }
-
+    
       JsonNode oldValue = v.get("old-value");
-      if (oldValue != null && !oldValue.isNull()) {
+    
+      if (oldValue != null
+          && !oldValue.isNull()
+          && (oldValue.isString()
+              || oldValue.isNumber()
+              || oldValue.isBoolean())) {
         return oldValue.asString();
       }
-
-      return v.toString();
+    
+      return null;
     }
-
-    return v.asString();
+  
+    if (v.isString() || v.isNumber() || v.isBoolean()) {
+      return v.asString();
+    }
+  
+    return null;
   }
 
   private static Long readLongOrNewValue(JsonNode node, String field) {
