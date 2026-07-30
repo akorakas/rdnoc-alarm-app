@@ -5,7 +5,9 @@ import java.util.List;
 import java.util.Objects;
 
 import tools.jackson.core.JacksonException;
+import tools.jackson.databind.MapperFeature;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.cfg.DateTimeFeature;
 import tools.jackson.databind.json.JsonMapper;
 import gr.ote.rdnoc.alarm.atlas.UnifiedEventMapper;
 import gr.ote.rdnoc.alarm.correlate.RedisAlarmInstanceCorrelator;
@@ -25,7 +27,12 @@ import gr.ote.rdnoc.alarm.service.pipeline.steps.UpdateStep;
 
 public class Transformer {
 
-  private static final ObjectMapper M = JsonMapper.builder().build();
+  private static final ObjectMapper M =
+      JsonMapper.builder()
+          .disable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
+          .enable(DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS)
+          .enable(DateTimeFeature.WRITE_DATE_TIMESTAMPS_AS_NANOSECONDS)
+          .build();
 
   private final List<TransformStep> steps;
 
