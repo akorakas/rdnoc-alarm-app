@@ -485,13 +485,20 @@ public class UnifiedEventMapper {
     ue.setNeEquipment("");
     ue.setAlarmIdentifier(null);
 
-    String exaType = classifyExaGridType(egSev);
-
-    log.info("EXAGRID sanity: egSev=[{}] normalized=[{}] => exaType=[{}] ctx.type=[{}] ctx.sev=[{}]",
-        egSev, normalize(egSev), exaType, typeStr, sevStr);
-
-    ue.setType(mapEventType(exaType));
-    ue.setSeverity(Severity.UNKNOWN);
+    String fallbackType = classifyExaGridType(egSev);
+    String effectiveType = firstNonBlank(typeStr, fallbackType);
+      
+    log.info(
+        "EXAGRID sanity: egSev=[{}] normalized=[{}] fallbackType=[{}] ctx.type=[{}] ctx.sev=[{}]",
+        egSev,
+        normalize(egSev),
+        fallbackType,
+        typeStr,
+        sevStr
+    );
+    
+    ue.setType(mapEventType(effectiveType));
+    ue.setSeverity(mapSeverity(sevStr));
 
     Long egTsMs = toEpochMillis(egCreateMs);
     ue.setTimestamp(parseEventTime(firstNonNull(egTsMs, tsMs), eventTime));
