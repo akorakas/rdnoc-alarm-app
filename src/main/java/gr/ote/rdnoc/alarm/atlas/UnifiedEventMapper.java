@@ -1192,11 +1192,7 @@ public class UnifiedEventMapper {
   }
 
   private static Long getLong(JsonNode n, String field) {
-    if (n == null) return null;
-
-    JsonNode v = n.get(field);
-
-    return (v == null || v.isNull()) ? null : v.asLong();
+    return readLongOrNewValue(n, field);
   }
 
   private static String readTextOrNewValue(JsonNode node, String field) {
