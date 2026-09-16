@@ -36,10 +36,11 @@ public class Mv36SyncCoordinator {
     }
 
     String listenerId = props.getSync().getKafkaListenerId();
+    EMSId sourceEms = props.getSnmp().getSourceEms();
 
     Map<String, String> headers = new HashMap<>();
     headers.put("source", "MV36-SNMP-SYNC");
-    headers.put("sourceEms", "MV36_MOBILE");
+    headers.put("sourceEms", sourceEms.name());
     headers.put("reason", reason);
 
     boolean listenerWasRunning = false;
@@ -56,7 +57,7 @@ public class Mv36SyncCoordinator {
 
       try {
         String syncStart = syncMarkerFactory.buildSyncStart(
-            EMSId.MV36_MOBILE,
+            sourceEms,
             EMSVendorID.MV_36,
             EMSDomain.TRANSPORT
         );
@@ -76,7 +77,7 @@ public class Mv36SyncCoordinator {
 
       try {
         String syncEnd = syncMarkerFactory.buildSyncEnd(
-            EMSId.MV36_MOBILE,
+            sourceEms,
             EMSVendorID.MV_36,
             EMSDomain.TRANSPORT
         );

@@ -8,8 +8,6 @@ import java.util.Optional;
 
 import org.springframework.stereotype.Component;
 
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.json.JsonMapper;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
 import gr.ote.atlas.events.enums.EMSDomain;
 import gr.ote.atlas.events.enums.EMSId;
@@ -24,6 +22,8 @@ import gr.ote.rdnoc.alarm.mv36.model.Mv36ActiveAlarm;
 import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 @Slf4j
 @Component
@@ -38,11 +38,7 @@ public class Mv36ActiveAlarmMapper {
   public UnifiedEvent toUnifiedEvent(Mv36ActiveAlarm alarm) {
     UnifiedEvent ue = new UnifiedEvent();
 
-    EMSId sourceEms = parseEnumOrDefault(
-        EMSId.class,
-        props.getSnmp().getSourceEms(),
-        EMSId.MV36_MOBILE
-    );
+    EMSId sourceEms = props.getSnmp().getSourceEms();
 
     EMSVendorID vendor = parseEnumOrDefault(
         EMSVendorID.class,
@@ -252,8 +248,8 @@ public class Mv36ActiveAlarmMapper {
     }
 
     try {
-      return Integer.parseInt(s.trim());
-    } catch (Exception e) {
+      return Integer.parseInt(s);
+    } catch (NumberFormatException e) {
       return null;
     }
   }

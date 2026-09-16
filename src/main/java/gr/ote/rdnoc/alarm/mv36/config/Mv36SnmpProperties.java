@@ -3,6 +3,8 @@ package gr.ote.rdnoc.alarm.mv36.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import gr.ote.atlas.events.enums.EMSId;
+
 @Component
 @ConfigurationProperties(prefix = "app.mv36")
 public class Mv36SnmpProperties {
@@ -93,7 +95,7 @@ public class Mv36SnmpProperties {
     private int retries = 2;
     private int maxRepetitions = 25;
 
-    private String sourceEms = "MV36_MOBILE";
+    private EMSId sourceEms = EMSId.MV36_MOBILE;
     private String emsVendorId = "MV_36";
     private String emsDomain = "TRANSPORT";
 
@@ -147,11 +149,11 @@ public class Mv36SnmpProperties {
       this.maxRepetitions = maxRepetitions;
     }
 
-    public String getSourceEms() {
+    public EMSId getSourceEms() {
       return sourceEms;
     }
-
-    public void setSourceEms(String sourceEms) {
+    
+    public void setSourceEms(EMSId sourceEms) {
       this.sourceEms = sourceEms;
     }
 
