@@ -53,7 +53,7 @@ public class UnifiedEventMapper {
 
   // 1350 OMS eventTime: "yyyyMMddHHmmss" without timezone.
   // Use Athens unless you confirm that 1350 OMS sends UTC.
-  private static final ZoneId OMS1350_DEFAULT_ZONE = ZoneId.of("Europe/Athens");
+  private static final ZoneId OMS1350_DEFAULT_ZONE = ZoneOffset.UTC;
 
   public UnifiedEventMapper(ObjectProvider<Mv36NeEnrichmentService> enrichmentProvider) {
     this.mv36NeEnrichmentService = enrichmentProvider.getIfAvailable();
