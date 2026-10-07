@@ -35,7 +35,8 @@ if ($LASTEXITCODE -ne 0) {
 
 if (-not (Test-Path -LiteralPath $Bundle)) { Fail "bundle not found: $Bundle" }
 
-if (G status --porcelain) { Fail "the working copy has uncommitted changes. Commit or stash them first." }
+# Untracked files (e.g. a copied bundle or script) don't block the sync; changes to tracked files do.
+if (G status --porcelain --untracked-files=no) { Fail "the working copy has uncommitted changes. Commit or stash them first." }
 
 $branch = G rev-parse --abbrev-ref HEAD
 if ($branch -ne 'main') {
@@ -74,7 +75,7 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host "Changes coming from GitHub $tag ($short):" -ForegroundColor Cyan
-G diff --cached --stat
+G --no-pager diff --cached --stat
 Write-Host ""
 
 G commit --quiet -m "Sync from GitHub $tag ($short)"

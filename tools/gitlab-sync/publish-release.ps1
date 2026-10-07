@@ -79,7 +79,7 @@ git diff --cached --quiet
 $hasChanges = ($LASTEXITCODE -ne 0)
 
 if ($hasChanges) {
-  git diff --cached --stat
+  git --no-pager diff --cached --stat
 } elseif ($ahead -gt 0) {
   Write-Host "No new changes; releasing the $ahead unpushed commit(s)."
 } else {

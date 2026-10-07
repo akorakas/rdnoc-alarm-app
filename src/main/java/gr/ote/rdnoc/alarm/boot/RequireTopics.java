@@ -16,6 +16,7 @@ import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.ListTopicsOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
@@ -23,6 +24,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 
 import gr.ote.rdnoc.alarm.service.config.SinksProperties;
@@ -32,7 +34,14 @@ public class RequireTopics {
 
   private static final Logger log = LoggerFactory.getLogger(RequireTopics.class);
 
-  /** Admin client for the INPUT cluster (built from spring.kafka.consumer.*) */
+  /**
+   * Admin client for the INPUT cluster (built from spring.kafka.consumer.*).
+   *
+   * Lazy: only static mode uses it. In dynamic mode (NSP) it is never created, so an
+   * unreachable spring.kafka.consumer.bootstrap-servers (e.g. the standby NSP site) doesn't
+   * produce a background AdminClient that retries - and logs - several times per second.
+   */
+  @Lazy
   @Bean(name = "inputAdminClient", destroyMethod = "close")
   public AdminClient inputAdminClient(KafkaProperties props) {
     Map<String, Object> cfg = new HashMap<>(props.buildConsumerProperties());
@@ -41,7 +50,7 @@ public class RequireTopics {
 
   @Bean
   public ApplicationRunner verifyAllTopics(
-      @Qualifier("inputAdminClient") AdminClient inputAdmin,
+      @Qualifier("inputAdminClient") ObjectProvider<AdminClient> inputAdminProvider,
       // IMPORTANT: this now comes ONLY from KafkaAdminClientsConfig
       @Qualifier("outputAdminClient") AdminClient outputAdmin,
 
@@ -73,7 +82,7 @@ public class RequireTopics {
       if (isDynamic) {
         log.info("[INPUT] app.kafka.mode={} -> skipping INPUT cluster check (active NSP site's Kafka is verified at runtime).", mode);
       } else {
-        verifyClusterReachable(inputAdmin, verifyTimeoutSec, "INPUT");
+        verifyClusterReachable(inputAdminProvider.getObject(), verifyTimeoutSec, "INPUT");
       }
       verifyClusterReachable(outputAdmin, verifyTimeoutSec, "OUTPUT");
 
@@ -90,7 +99,7 @@ public class RequireTopics {
         }
 
         if (verifyInputTopic) {
-          verifyTopicsExist(inputAdmin, Set.of(input), verifyTimeoutSec, "INPUT");
+          verifyTopicsExist(inputAdminProvider.getObject(), Set.of(input), verifyTimeoutSec, "INPUT");
         } else {
           log.info("[INPUT] Static mode: input-topic='{}' set, but verify-input-topic=false so topic existence won't be checked.", input);
         }
