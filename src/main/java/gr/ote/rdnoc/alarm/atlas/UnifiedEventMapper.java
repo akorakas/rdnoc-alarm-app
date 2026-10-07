@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
+import gr.ote.atlas.events.emsspecificevents.GenericSourceEvent;
 import gr.ote.atlas.events.emsspecificevents.NokiaAtnoiAlarm;
 import gr.ote.atlas.events.emsspecificevents.NokiaNfmTAlarm;
 import gr.ote.atlas.events.emsspecificevents.TelegrafGenericEvent;
@@ -54,6 +55,10 @@ public class UnifiedEventMapper {
   // 1350 OMS eventTime: "yyyyMMddHHmmss" without timezone.
   // Use Athens unless you confirm that 1350 OMS sends UTC.
   private static final ZoneId OMS1350_DEFAULT_ZONE = ZoneOffset.UTC;
+
+  // MV38 raisingTime/clearTime: "yyyyMMddHHmmss" + a suffix, in local Athens time.
+  private static final DateTimeFormatter MV38_TS_FMT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+  private static final ZoneId MV38_ZONE = ZoneId.of("Europe/Athens");
 
   public UnifiedEventMapper(ObjectProvider<Mv36NeEnrichmentService> enrichmentProvider) {
     this.mv36NeEnrichmentService = enrichmentProvider.getIfAvailable();
@@ -123,6 +128,14 @@ public class UnifiedEventMapper {
             || sourceEms == EMSId.NOKIA_1350_OTNE
             || sourceEms == EMSId.NOKIA_1350_PKT;
     boolean isNfmT     = sourceEms == EMSId.NOKIA_NFM_T;
+    boolean isMv38     = sourceEms == EMSId.MV38_FIXED || sourceEms == EMSId.MV38_MOBILE;
+
+    if (isMv38) {
+
+      // ------------------------------------------------------------------
+      // ERICSSON MV38 (PSB CORBA collector JSON, flat object)
+      // ------------------------------------------------------------------
+      applyMv38Mapping(ue, sourceEventNode, eventTime, emsDomainRaw);
 
     // ------------------------------------------------------------------
     // TELEGRAF FLOWS
@@ -131,7 +144,7 @@ public class UnifiedEventMapper {
     //   - MV36_MOBILE
     //   - NOKIA_1350_EML1 / EML2 / OTNE / PKT
     // ------------------------------------------------------------------
-    if (isTelegraf && (isExaGrid || isTnms || isMv36 || isOms1350)) {
+    } else if (isTelegraf && (isExaGrid || isTnms || isMv36 || isOms1350)) {
 
       ue.setSourceEvent(toTelegrafGenericEvent(sourceEventNode, isMv36));
 
@@ -455,6 +468,150 @@ public class UnifiedEventMapper {
     if (n.getAffectedObjectName() == null) n.setAffectedObjectName(effectiveNeEquipment);
 
     ue.setSourceEvent(n);
+  }
+
+  // ============================================================================================
+  // ERICSSON MV38 mapping (PSB CORBA collector)
+  //
+  //   neName          <- resourceName
+  //   neEquipment     <- resource/signalType
+  //   alarmIdentifier <- resourceName/resource/signalType/resourceState
+  //   faultId         <- resourceState
+  //   serialNo        <- alarmId   (stable across raise and clear)
+  //   type            <- kind=snapshot -> FAULT_SYNC
+  //                      kind=event    -> alarmState: on -> FAULT, deleted/cleared/off -> CLEAR
+  //                      kind=snapshot_start / snapshot_end -> SYNC_START / SYNC_END marker
+  //   timestamp       <- raisingTime (FAULT, FAULT_SYNC) / clearTime (CLEAR)
+  // ============================================================================================
+
+  private static void applyMv38Mapping(
+      UnifiedEvent ue,
+      JsonNode src,
+      String eventTimeFromCtx,
+      String emsDomainRaw
+  ) {
+    ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.TRANSPORT));
+
+    String kind = normalize(getText(src, "kind"));
+
+    // Snapshot boundaries sent by the collector -> sync markers, same shape as
+    // SyncMarkerFactory's generic marker used by the other systems.
+    if ("snapshot_start".equals(kind) || "sync_start".equals(kind)) {
+      applyMv38SyncMarker(ue, src, EventType.SYNC_START);
+      return;
+    }
+    if ("snapshot_end".equals(kind) || "sync_end".equals(kind)) {
+      applyMv38SyncMarker(ue, src, EventType.SYNC_END);
+      return;
+    }
+
+    String alarmId       = clean(getText(src, "alarmId"));
+    String resourceName  = clean(getText(src, "resourceName"));
+    String resource      = clean(getText(src, "resource"));
+    String signalType    = clean(getText(src, "signalType"));
+    String resourceState = clean(getText(src, "resourceState"));
+
+    EventType type = "snapshot".equals(kind)
+        ? EventType.FAULT_SYNC
+        : mapMv38Type(getText(src, "alarmState"));
+
+    ue.setType(type);
+    ue.setSeverity(type == EventType.CLEAR ? Severity.CLEARED : mapSeverity(getText(src, "severity")));
+
+    Long raisedMs  = mv38TimeToEpochMs(getText(src, "raisingTime"));
+    Long clearedMs = mv38TimeToEpochMs(getText(src, "clearTime"));
+    Long tsMs = type == EventType.CLEAR ? firstNonNull(clearedMs, raisedMs) : raisedMs;
+    ue.setTimestamp(parseEventTime(tsMs, eventTimeFromCtx));
+
+    ue.setSerialNo(alarmId);
+    ue.setFaultId(resourceState);
+    ue.setNeName(resourceName);
+    ue.setNeEquipment(firstNonBlank(joinNonBlank("/", resource, signalType), ""));
+    ue.setAlarmIdentifier(firstNonBlank(
+        joinNonBlank("/", resourceName, resource, signalType, resourceState),
+        alarmId
+    ));
+
+    ue.setSourceEvent(toGenericSourceEvent(src, type, alarmId));
+  }
+
+  private static void applyMv38SyncMarker(UnifiedEvent ue, JsonNode src, EventType type) {
+    String ems = ue.getSourceEms().name();
+
+    ue.setType(type);
+    ue.setSeverity(Severity.UNKNOWN);
+    ue.setTimestamp(Instant.now());
+    ue.setSerialNo("");
+    ue.setFaultId(type.name());
+    ue.setNeName("");
+    ue.setNeEquipment("");
+    ue.setAlarmIdentifier(ems + "_" + type.name());
+
+    TelegrafGenericEvent se = new TelegrafGenericEvent();
+    Map<String, String> fields = new LinkedHashMap<>();
+    fields.put("sourceIndex", "");
+    fields.put("markerType", type.name());
+    String count = clean(getText(src, "count"));
+    if (count != null) fields.put("count", count);
+
+    Map<String, String> tags = new LinkedHashMap<>();
+    tags.put("source", "SYNC");
+    tags.put("sourceEms", ems);
+    tags.put("markerType", type.name());
+
+    se.setFields(fields);
+    se.setTags(tags);
+    se.setTimestamp(Instant.now().getEpochSecond());
+    ue.setSourceEvent(se);
+
+    Map<String, Object> metadata = new LinkedHashMap<>();
+    metadata.put("source", "SYNC");
+    metadata.put("sourceEms", ems);
+    metadata.put("markerType", type.name());
+    ue.setMetadata(metadata);
+  }
+
+  private static EventType mapMv38Type(String alarmState) {
+    return switch (normalize(alarmState)) {
+      case "on" -> EventType.FAULT;
+      case "deleted", "cleared", "clear", "off" -> EventType.CLEAR;
+      default -> EventType.UNKNOWN;
+    };
+  }
+
+  /**
+   * MV38 times look like "20261001140316-0200". The 14 digits are LOCAL Athens time:
+   * a record logged at 14:03:45 EEST carries raisingTime 14:03:16. The "-0200" suffix is
+   * not a usable UTC offset (applying it would shift times by ~5h), so it is ignored.
+   */
+  private static Long mv38TimeToEpochMs(String value) {
+    String s = clean(value);
+    if (s == null || s.length() < 14) {
+      return null;
+    }
+
+    try {
+      LocalDateTime ldt = LocalDateTime.parse(s.substring(0, 14), MV38_TS_FMT);
+      return ldt.atZone(MV38_ZONE).toInstant().toEpochMilli();
+    } catch (Exception ignore) {
+      return null;
+    }
+  }
+
+  /** Keeps the whole collector record (every field) as the sourceEvent. */
+  private static GenericSourceEvent toGenericSourceEvent(JsonNode src, EventType type, String objectIdentifier) {
+    GenericSourceEvent g = new GenericSourceEvent();
+    g.setEventType(type);
+    g.setObjectIdentifier(objectIdentifier);
+
+    if (src != null && src.isObject()) {
+      for (Map.Entry<String, JsonNode> e : src.properties()) {
+        JsonNode v = e.getValue();
+        g.addProperty(e.getKey(), v == null || v.isNull() ? null : (v.isValueNode() ? v.asString() : v));
+      }
+    }
+
+    return g;
   }
 
   // ============================================================================================

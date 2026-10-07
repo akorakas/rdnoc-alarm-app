@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -119,13 +120,17 @@ public class NspClient {
   @Value("${app.rest.nsp.subscription.property-filter:affectedObjectType NOT LIKE 'NmsSystem'}")
   private String subscriptionPropertyFilter;
 
+  // Optional authenticated GET used by probeRest() as an extra "is this site active?" check.
+  @Value("${app.rest.nsp.failover.probe-path:}")
+  private String probePath;
+
   // ─────────────────────────────────────────────────────────────────────────
-  // Host-aware token cache
+  // Per-host token cache
   // ─────────────────────────────────────────────────────────────────────────
 
-  private String cachedToken;
-  private String cachedTokenHost;
-  private Instant tokenExpiresAt = Instant.EPOCH;
+  private record CachedToken(String token, Instant expiresAt) {}
+
+  private final Map<String, CachedToken> tokenCache = new ConcurrentHashMap<>();
 
   private String baseUrl(String selectedHost) {
     return scheme + "://" + selectedHost;
@@ -137,7 +142,6 @@ public class NspClient {
 
   public void forceActiveHost(String host) {
     siteSelector.forceActiveHost(host);
-    clearCachedToken();
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -159,7 +163,7 @@ public class NspClient {
       } catch (Exception e) {
         last = e;
 
-        clearCachedToken();
+        clearCachedToken(candidateHost);
 
         siteSelector.markFailure(candidateHost, e);
 
@@ -175,10 +179,10 @@ public class NspClient {
     );
   }
 
-  private synchronized void clearCachedToken() {
-    this.cachedToken = null;
-    this.cachedTokenHost = null;
-    this.tokenExpiresAt = Instant.EPOCH;
+  private void clearCachedToken(String host) {
+    if (host != null) {
+      tokenCache.remove(host);
+    }
   }
 
   @FunctionalInterface
@@ -221,10 +225,9 @@ public class NspClient {
       throw new IllegalArgumentException("selectedHost is blank");
     }
 
-    if (cachedToken != null
-        && selectedHost.equals(cachedTokenHost)
-        && Instant.now().isBefore(tokenExpiresAt.minusSeconds(60))) {
-      return cachedToken;
+    CachedToken cached = tokenCache.get(selectedHost);
+    if (cached != null && Instant.now().isBefore(cached.expiresAt().minusSeconds(60))) {
+      return cached.token();
     }
 
     String url = baseUrl(selectedHost) + tokenPath;
@@ -263,13 +266,53 @@ public class NspClient {
       );
     }
 
-    this.cachedToken = accessToken;
-    this.cachedTokenHost = selectedHost;
-    this.tokenExpiresAt = Instant.now().plusSeconds(expiresIn);
+    tokenCache.put(selectedHost, new CachedToken(accessToken, Instant.now().plusSeconds(expiresIn)));
 
     log.info("NSP token acquired. host={}, expiresIn={}s", selectedHost, expiresIn);
 
     return accessToken;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Site probe (used to decide which NSP site is ACTIVE)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * REST half of the "is this site active?" check. The standby site refuses REST calls,
+   * so a successful token request is the signal. A cached, still-valid token is reused
+   * to avoid opening a new NSP session on every health check.
+   *
+   * If app.rest.nsp.failover.probe-path is set, an authenticated GET to it must also succeed.
+   *
+   * Throws on failure; does not touch the active site.
+   */
+  public void probeRest(String host) throws Exception {
+    String token = getAccessToken(host);
+
+    if (probePath == null || probePath.isBlank()) {
+      return;
+    }
+
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(token);
+    headers.setAccept(List.of(MediaType.valueOf(accept)));
+
+    try {
+      ResponseEntity<String> response = restTemplate.exchange(
+          URI.create(baseUrl(host) + probePath.trim()),
+          HttpMethod.GET,
+          new HttpEntity<Void>(headers),
+          String.class
+      );
+
+      if (!response.getStatusCode().is2xxSuccessful()) {
+        throw new IllegalStateException("NSP probe " + probePath + " on host=" + host
+            + " returned " + response.getStatusCode());
+      }
+    } catch (Exception e) {
+      clearCachedToken(host);
+      throw e;
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -730,7 +773,8 @@ public class NspClient {
         ? siteSelector.activeHost()
         : hostForSubscription.trim();
 
-    siteSelector.forceActiveHost(selectedHost);
+    // Note: renew does not change the active site. The active site is decided by the
+    // REST + Kafka probe in NspSubscriptionManager, never as a side effect of a renew.
 
     String token = getAccessToken(selectedHost);
 

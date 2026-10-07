@@ -65,8 +65,16 @@ public class RequireTopics {
       final boolean isStatic = "static".equalsIgnoreCase(mode);
       final boolean isDynamic = !isStatic; // default dynamic
 
-      // 1) Verify both clusters are reachable
-      verifyClusterReachable(inputAdmin, verifyTimeoutSec, "INPUT");
+      // 1) Verify clusters are reachable.
+      //    dynamic: the INPUT cluster is the ACTIVE NSP site's Kafka, chosen at runtime by
+      //             NspSubscriptionManager (REST + Kafka probe). Checking the fixed
+      //             spring.kafka.consumer.bootstrap-servers here would make startup depend on
+      //             one specific site, which defeats failover.
+      if (isDynamic) {
+        log.info("[INPUT] app.kafka.mode={} -> skipping INPUT cluster check (active NSP site's Kafka is verified at runtime).", mode);
+      } else {
+        verifyClusterReachable(inputAdmin, verifyTimeoutSec, "INPUT");
+      }
       verifyClusterReachable(outputAdmin, verifyTimeoutSec, "OUTPUT");
 
       // 2) Input topic rules:

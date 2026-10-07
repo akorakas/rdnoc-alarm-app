@@ -1,11 +1,13 @@
 package gr.ote.rdnoc.alarm.nsp;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
@@ -34,8 +36,14 @@ public class NspSubscriptionManager {
   private final long lockWaitTimeoutMs;
   private final long lockWaitSleepMs;
 
+  private final NspSiteProbe siteProbe;
+  private final long activeSiteWaitTimeoutMs;
+  private final long activeSiteWaitSleepMs;
+  private final int siteFailureThreshold;
+
   private final AtomicBoolean busy = new AtomicBoolean(false);
   private final AtomicBoolean startupCompleted = new AtomicBoolean(false);
+  private final AtomicInteger activeSiteFailures = new AtomicInteger(0);
 
   public NspSubscriptionManager(
       NspClient nspClient,
@@ -44,6 +52,8 @@ public class NspSubscriptionManager {
       NspKafkaAdminClientFactory adminClientFactory,
       DynamicKafkaConsumer consumer,
       SyncCoordinator sync,
+      NspSiteProbe siteProbe,
+      NspFailoverProperties failoverProps,
       @Value("${app.nsp.subscription.topic-wait-timeout-ms:180000}") long topicWaitTimeoutMs,
       @Value("${app.nsp.subscription.topic-wait-sleep-ms:2000}") long topicWaitSleepMs,
       @Value("${app.nsp.subscription.lock-wait-timeout-ms:60000}") long lockWaitTimeoutMs,
@@ -55,6 +65,10 @@ public class NspSubscriptionManager {
     this.adminClientFactory = adminClientFactory;
     this.consumer = consumer;
     this.sync = sync;
+    this.siteProbe = siteProbe;
+    this.activeSiteWaitTimeoutMs = failoverProps.getStartupWaitTimeoutMs();
+    this.activeSiteWaitSleepMs = failoverProps.getStartupWaitSleepMs();
+    this.siteFailureThreshold = Math.max(1, failoverProps.getHealthCheck().getFailureThreshold());
     this.topicWaitTimeoutMs = topicWaitTimeoutMs;
     this.topicWaitSleepMs = topicWaitSleepMs;
     this.lockWaitTimeoutMs = lockWaitTimeoutMs;
@@ -77,6 +91,25 @@ public class NspSubscriptionManager {
    */
   public void startFlow(String reason) throws Exception {
     withLock("startFlow", () -> {
+      /*
+       * Failover: first find the ACTIVE site (REST + Kafka both answer).
+       * A stored subscription that belongs to the other site is useless (its topic lives
+       * on that site's Kafka), so recreate it on the active site.
+       */
+      if (siteSelector.isFailoverEnabled()) {
+        NspSite active = waitForActiveSite();
+
+        Optional<NspSubscriptionState> stored = stateStore.load();
+        if (stored.isPresent() && !active.hasHost(stored.get().host())) {
+          log.warn("Startup: stored subscription is on host={}, but the active site is {} -> recreate on active site",
+              stored.get().host(), active);
+
+          recreate("startup-active-site-" + active.name());
+          startupCompleted.set(true);
+          return null;
+        }
+      }
+
       Optional<NspSubscriptionState> existing = stateStore.load();
 
       if (existing.isPresent()) {
@@ -172,6 +205,14 @@ public class NspSubscriptionManager {
 
         NspSubscriptionState state = normalizeState(stateOpt.get());
 
+        if (siteSelector.isFailoverEnabled() && !siteSelector.activeSite().hasHost(state.host())) {
+          log.warn("Renew: subscription is on host={}, but the active site is {} -> recreate on active site",
+              state.host(), siteSelector.activeSite());
+
+          recreate("renew-active-site-mismatch");
+          return null;
+        }
+
         TopicStatus status = checkTopic(state);
 
         if (status == TopicStatus.MISSING) {
@@ -219,6 +260,109 @@ public class NspSubscriptionManager {
       });
     } catch (Exception e) {
       log.error("Failover failed. reason={}", reason, e);
+    }
+  }
+
+  /**
+   * Periodic active-site check (failover only). Called by NspSiteHealthScheduler.
+   *
+   * 1. Active site healthy (REST + Kafka)  -> reset failure counter; if the subscription
+   *    somehow lives on another site (e.g. a REST call failed over), move it here.
+   * 2. Active site unhealthy               -> count; after failure-threshold consecutive
+   *    failures, probe all sites (current first) and move to whichever is active.
+   * 3. No site active                      -> keep everything as is and retry next tick.
+   *
+   * Never waits for the lock: if a sync/renew is running, this tick is skipped.
+   */
+  public void checkActiveSite() {
+    if (!siteSelector.isFailoverEnabled()) return;
+
+    if (!startupCompleted.get()) {
+      log.debug("Active-site check skipped: startup not completed");
+      return;
+    }
+
+    try {
+      tryWithLock("activeSiteCheck", () -> {
+        NspSite current = siteSelector.activeSite();
+        String subscriptionHost = stateStore.load().map(NspSubscriptionState::host).orElse(null);
+
+        if (siteProbe.isActive(current)) {
+          int previousFailures = activeSiteFailures.getAndSet(0);
+          if (previousFailures > 0) {
+            log.info("Active NSP site {} healthy again after {} failed check(s)", current, previousFailures);
+          }
+
+          if (!current.hasHost(subscriptionHost)) {
+            log.warn("Active NSP site is {} but subscription is on host={} -> recreate on active site",
+                current, subscriptionHost);
+            recreate("active-site-mismatch");
+          }
+          return null;
+        }
+
+        int failures = activeSiteFailures.incrementAndGet();
+        if (failures < siteFailureThreshold) {
+          log.warn("Active NSP site {} failed health check ({}/{})", current, failures, siteFailureThreshold);
+          return null;
+        }
+
+        log.warn("Active NSP site {} failed {} consecutive health checks -> looking for the active site",
+            current, failures);
+
+        Optional<NspSite> next = resolveActiveSite();
+        if (next.isEmpty()) {
+          log.error("No NSP site is active (REST + Kafka). Keeping current subscription; will retry. sites={}",
+              siteSelector.sites());
+          return null;
+        }
+
+        activeSiteFailures.set(0);
+        NspSite active = next.get();
+
+        if (active.hasHost(subscriptionHost)) {
+          log.info("NSP site {} is still the active site; no failover needed", active);
+          return null;
+        }
+
+        log.warn("NSP FAILOVER: {} -> {}", current, active);
+        recreate("failover-" + current.name() + "-to-" + active.name());
+        return null;
+      });
+    } catch (Exception e) {
+      log.error("Active-site check failed", e);
+    }
+  }
+
+  /** Probe sites (active first) and make the first active one the selected site. */
+  private Optional<NspSite> resolveActiveSite() {
+    for (NspSite site : siteSelector.sitesInProbeOrder()) {
+      if (siteProbe.isActive(site)) {
+        siteSelector.setActiveSite(site);
+        return Optional.of(site);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private NspSite waitForActiveSite() throws InterruptedException {
+    long deadline = System.currentTimeMillis() + activeSiteWaitTimeoutMs;
+
+    while (true) {
+      Optional<NspSite> active = resolveActiveSite();
+      if (active.isPresent()) {
+        log.info("Startup: active NSP site is {}", active.get());
+        return active.get();
+      }
+
+      if (System.currentTimeMillis() >= deadline) {
+        throw new IllegalStateException("No active NSP site found within " + activeSiteWaitTimeoutMs
+            + "ms (REST + Kafka must both answer). sites=" + siteSelector.sites());
+      }
+
+      log.warn("Startup: no active NSP site yet; retrying in {}ms. sites={}",
+          activeSiteWaitSleepMs, siteSelector.sites());
+      TimeUnit.MILLISECONDS.sleep(activeSiteWaitSleepMs);
     }
   }
 
@@ -306,6 +450,23 @@ public class NspSubscriptionManager {
   private NspSubscriptionState normalizeState(NspSubscriptionState state) {
     if (state == null) {
       return null;
+    }
+
+    // The configured site is the source of truth for host -> Kafka. This also repairs
+    // state files written by older versions that could pair a host with the wrong Kafka.
+    if (state.hasHost()) {
+      Optional<NspSite> site = siteSelector.findByHost(state.host());
+      if (site.isPresent()) {
+        String kafka = site.get().kafkaBootstrapServers();
+        if (!kafka.equals(state.kafkaBootstrapServers())) {
+          if (state.hasKafkaBootstrapServers()) {
+            log.warn("Stored subscription for host={} had kafkaBootstrapServers={}; using configured {}",
+                state.host(), state.kafkaBootstrapServers(), kafka);
+          }
+          return new NspSubscriptionState(state.subscriptionId(), state.topicId(), state.host(), kafka);
+        }
+        return state;
+      }
     }
 
     if (state.hasKafkaBootstrapServers()) {
@@ -419,7 +580,9 @@ public class NspSubscriptionManager {
       return TopicStatus.UNREACHABLE_OR_UNKNOWN;
     }
 
-    try (AdminClient admin = adminClientFactory.create(state.kafkaBootstrapServers())) {
+    AdminClient admin = null;
+    try {
+      admin = adminClientFactory.create(state.kafkaBootstrapServers());
       admin.describeTopics(List.of(state.topicId()))
           .allTopicNames()
           .get(5, TimeUnit.SECONDS);
@@ -457,6 +620,26 @@ public class NspSubscriptionManager {
           state.topicId(), state.kafkaBootstrapServers(), e);
 
       return TopicStatus.UNREACHABLE_OR_UNKNOWN;
+
+    } finally {
+      if (admin != null) {
+        // Bounded close: a plain close() waits for in-flight calls up to default.api.timeout.ms.
+        admin.close(Duration.ofSeconds(1));
+      }
+    }
+  }
+
+  /** Like withLock, but never waits: skips the operation if the manager is busy. */
+  private <T> T tryWithLock(String op, CheckedSupplier<T> fn) throws Exception {
+    if (!busy.compareAndSet(false, true)) {
+      log.debug("Skip {}: manager is busy", op);
+      return null;
+    }
+
+    try {
+      return fn.get();
+    } finally {
+      busy.set(false);
     }
   }
 

@@ -41,5 +41,8 @@ public enum EMSId {
     NOKIA_1350_PKT,
     MV36_FIXED_A,
     MV36_FIXED_B,
-    MV36_FIXED_C
+    MV36_FIXED_C,
+    // Append only: the ordinal is the output Kafka partition.
+    MV38_FIXED,
+    MV38_MOBILE
 }
