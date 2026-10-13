@@ -551,7 +551,10 @@ public class UnifiedEventMapper {
     Map<String, String> fields = new LinkedHashMap<>();
     fields.put("sourceIndex", "");
     fields.put("markerType", type.name());
+    // From the collector: snapshotId pairs SYNC_START with its SYNC_END; count = alarms in the snapshot.
+    String snapshotId = clean(getText(src, "snapshotId"));
     String count = clean(getText(src, "count"));
+    if (snapshotId != null) fields.put("snapshotId", snapshotId);
     if (count != null) fields.put("count", count);
 
     Map<String, String> tags = new LinkedHashMap<>();
@@ -568,6 +571,8 @@ public class UnifiedEventMapper {
     metadata.put("source", "SYNC");
     metadata.put("sourceEms", ems);
     metadata.put("markerType", type.name());
+    if (snapshotId != null) metadata.put("snapshotId", snapshotId);
+    if (count != null) metadata.put("count", count);
     ue.setMetadata(metadata);
   }
 

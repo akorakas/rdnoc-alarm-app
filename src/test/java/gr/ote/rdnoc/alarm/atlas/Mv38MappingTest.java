@@ -72,7 +72,7 @@ class Mv38MappingTest {
     update.setType("update");
     update.setCompute(List.of(
         assign("sourceEms", "'" + sourceEms + "'"),
-        assign("emsVendorID", "'UNKNOWN'"),
+        assign("emsVendorID", "'MV_38'"),
         assign("emsDomain", "'TRANSPORT'")));
 
     var unified = new TransformProperties.Step();
@@ -108,6 +108,7 @@ class Mv38MappingTest {
 
     assertThat(ue.get("sourceEms").asString()).isEqualTo("MV38_FIXED");
     assertThat(ue.get("emsDomain").asString()).isEqualTo("TRANSPORT");
+    assertThat(ue.get("emsVendorID").asString()).isEqualTo("MV_38");
     assertThat(ue.get("type").asString()).isEqualTo("FAULT");
     assertThat(ue.get("severity").asString()).isEqualTo("CRITICAL");
 
@@ -174,18 +175,27 @@ class Mv38MappingTest {
   @Test
   void snapshotStartAndEndRecordsBecomeSyncMarkers() {
     JsonNode start = M.readTree(transformer("MV38_MOBILE").transform(
-        "{\"ts\":\"Thu Oct 01 16:42:27 EEST 2026\",\"kind\":\"snapshot_start\"}"));
+        "{\"kind\":\"snapshot_start\",\"source\":\"MV38_MOBILE\",\"snapshotId\":1,\"count\":6,"
+            + "\"ts\":\"Tue Oct 13 10:07:40 EEST 2026\"}"));
     JsonNode end = M.readTree(transformer("MV38_MOBILE").transform(
-        "{\"ts\":\"Thu Oct 01 16:42:29 EEST 2026\",\"kind\":\"snapshot_end\",\"count\":11}"));
+        "{\"kind\":\"snapshot_end\",\"source\":\"MV38_MOBILE\",\"snapshotId\":1,\"count\":6,"
+            + "\"ts\":\"Tue Oct 13 10:07:40 EEST 2026\"}"));
 
     assertThat(start.get("type").asString()).isEqualTo("SYNC_START");
     assertThat(start.get("sourceEms").asString()).isEqualTo("MV38_MOBILE");
     assertThat(start.get("alarmIdentifier").asString()).isEqualTo("MV38_MOBILE_SYNC_START");
     assertThat(start.get("faultId").asString()).isEqualTo("SYNC_START");
+    assertThat(start.get("emsVendorID").asString()).isEqualTo("MV_38");
     assertThat(start.get("metadata").get("source").asString()).isEqualTo("SYNC");
+    assertThat(start.get("metadata").get("snapshotId").asString()).isEqualTo("1");
+    assertThat(start.get("sourceEvent").get("fields").get("count").asString()).isEqualTo("6");
 
     assertThat(end.get("type").asString()).isEqualTo("SYNC_END");
     assertThat(end.get("alarmIdentifier").asString()).isEqualTo("MV38_MOBILE_SYNC_END");
-    assertThat(end.get("sourceEvent").get("fields").get("count").asString()).isEqualTo("11");
+    assertThat(end.get("sourceEvent").get("fields").get("count").asString()).isEqualTo("6");
+    // snapshotId pairs this SYNC_END with its SYNC_START
+    assertThat(end.get("sourceEvent").get("fields").get("snapshotId").asString()).isEqualTo("1");
+    assertThat(end.get("metadata").get("snapshotId").asString()).isEqualTo("1");
+    assertThat(end.get("metadata").get("count").asString()).isEqualTo("6");
   }
 }
