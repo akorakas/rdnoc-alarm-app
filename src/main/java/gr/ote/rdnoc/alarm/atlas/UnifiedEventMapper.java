@@ -479,7 +479,8 @@ public class UnifiedEventMapper {
   //   faultId         <- resourceState
   //   serialNo        <- alarmId   (stable across raise and clear)
   //   type            <- kind=snapshot -> FAULT_SYNC
-  //                      kind=event    -> alarmState: on -> FAULT, deleted/cleared/off -> CLEAR
+  //                      kind=event    -> alarmState: on -> FAULT, clr/deleted/cleared/off -> CLEAR
+  //                                       (any other state with a clearTime -> CLEAR)
   //                      kind=snapshot_start / snapshot_end -> SYNC_START / SYNC_END marker
   //   timestamp       <- raisingTime (FAULT, FAULT_SYNC) / clearTime (CLEAR)
   // ============================================================================================
@@ -514,6 +515,10 @@ public class UnifiedEventMapper {
     EventType type = "snapshot".equals(kind)
         ? EventType.FAULT_SYNC
         : mapMv38Type(getText(src, "alarmState"));
+    // Unrecognised alarmState but the collector reports a clearTime -> the alarm is cleared.
+    if (type == EventType.UNKNOWN && clean(getText(src, "clearTime")) != null) {
+      type = EventType.CLEAR;
+    }
 
     ue.setType(type);
     ue.setSeverity(type == EventType.CLEAR ? Severity.CLEARED : mapSeverity(getText(src, "severity")));
@@ -579,7 +584,7 @@ public class UnifiedEventMapper {
   private static EventType mapMv38Type(String alarmState) {
     return switch (normalize(alarmState)) {
       case "on" -> EventType.FAULT;
-      case "deleted", "cleared", "clear", "off" -> EventType.CLEAR;
+      case "clr", "deleted", "cleared", "clear", "off" -> EventType.CLEAR;
       default -> EventType.UNKNOWN;
     };
   }

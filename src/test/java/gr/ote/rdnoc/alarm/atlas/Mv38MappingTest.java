@@ -57,6 +57,15 @@ class Mv38MappingTest {
        "raisingTime":"20230202150535-0200","ackTime":"","ackUser":"","clearTime":"","clearUser":"","clearReason":"",
        "clearAckTime":"","clearAckUser":"","alarmState":"on","serviceState":""}""";
 
+  private static final String MOBILE_CLR = """
+      {"ts":"Tue Oct 13 10:43:24 UTC 2026","kind":"event","alarmId":"CC_HELLAS_GOLD_STRATONI_MGEERM03_ET1384_DA2",
+       "resourceName":"CC_HELLAS_GOLD_STRATONI_MGEERM03_ET1384_DA","resource":"path","nmId":"","pathLinkId":"34876",
+       "signalType":"5 (SignalType_vc12)","lnType":"","pathStruct":"0 (PathStruct_notStructurable)",
+       "resourceState":"3 (ResourceState_enableActivated)","customerData":"","severity":"critical",
+       "raisingTime":"20261013134258-0200","ackTime":"","ackUser":"","clearTime":"20261013134319-0200",
+       "clearUser":"","clearReason":"2","clearAckTime":"","clearAckUser":"","alarmState":"clr",
+       "serviceState":"1 (ServiceState_inService)"}""";
+
   private static Transformer mv38Transformer() {
     return transformer("MV38_FIXED");
   }
@@ -143,6 +152,24 @@ class Mv38MappingTest {
         .isEqualTo("KILKIS/3sl3/p07-THEB/7/sl22/p15 30001 Kilkis_OIKIAKO-TheB 1219932");
     // resourceState differs from the raise, so faultId/alarmIdentifier differ too
     assertThat(ue.get("faultId").asString()).isEqualTo("11 (ResourceState_enableActivedActived)");
+  }
+
+  @Test
+  void clrIsAClearTimedAtClearTime() {
+    JsonNode ue = M.readTree(transformer("MV38_MOBILE").transform(MOBILE_CLR));
+
+    assertThat(ue.get("type").asString()).isEqualTo("CLEAR");
+    assertThat(ue.get("severity").asString()).isEqualTo("CLEARED");
+    // 13:43:19 Athens (EEST) = 10:43:19Z
+    assertThat(ts(ue)).isEqualTo(Instant.parse("2026-10-13T10:43:19Z"));
+  }
+
+  @Test
+  void unknownStateWithClearTimeIsAClear() {
+    JsonNode ue = M.readTree(transformer("MV38_MOBILE").transform(
+        MOBILE_CLR.replace("\"alarmState\":\"clr\"", "\"alarmState\":\"somethingNew\"")));
+
+    assertThat(ue.get("type").asString()).isEqualTo("CLEAR");
   }
 
   @Test
