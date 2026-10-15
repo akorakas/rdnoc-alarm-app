@@ -141,17 +141,25 @@ class Mv38MappingTest {
   }
 
   @Test
-  void deletedIsAClearTimedAtClearTime() {
+  void deletedIsAPurgeTimedWhenTheCollectorReceivedIt() {
     JsonNode ue = run(CLEAR);
 
-    assertThat(ue.get("type").asString()).isEqualTo("CLEAR");
+    assertThat(ue.get("type").asString()).isEqualTo("PURGE");
     assertThat(ue.get("severity").asString()).isEqualTo("CLEARED");
-    assertThat(ts(ue)).isEqualTo(Instant.parse("2026-10-01T11:03:18Z"));
-    // Same serialNo as the raise -> the stable key for matching FAULT and CLEAR
+    // collector ts "Thu Oct 01 14:03:27 EEST 2026" = 11:03:27Z
+    assertThat(ts(ue)).isEqualTo(Instant.parse("2026-10-01T11:03:27Z"));
+    // Same serialNo as the raise -> the stable key for matching FAULT and PURGE
     assertThat(ue.get("serialNo").asString())
         .isEqualTo("KILKIS/3sl3/p07-THEB/7/sl22/p15 30001 Kilkis_OIKIAKO-TheB 1219932");
-    // resourceState differs from the raise, so faultId/alarmIdentifier differ too
     assertThat(ue.get("faultId").asString()).isEqualTo("11 (ResourceState_enableActivedActived)");
+  }
+
+  @Test
+  void deletedWithoutCollectorTsFallsBackToClearTime() {
+    JsonNode ue = run(CLEAR.replace("\"ts\":\"Thu Oct 01 14:03:27 EEST 2026\",", ""));
+
+    assertThat(ue.get("type").asString()).isEqualTo("PURGE");
+    assertThat(ts(ue)).isEqualTo(Instant.parse("2026-10-01T11:03:18Z"));
   }
 
   @Test

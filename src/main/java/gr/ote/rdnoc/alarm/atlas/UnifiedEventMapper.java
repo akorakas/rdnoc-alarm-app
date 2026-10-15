@@ -4,9 +4,11 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import org.slf4j.Logger;
@@ -59,6 +61,9 @@ public class UnifiedEventMapper {
   // MV38 raisingTime/clearTime: "yyyyMMddHHmmss" + a suffix, in local Athens time.
   private static final DateTimeFormatter MV38_TS_FMT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
   private static final ZoneId MV38_ZONE = ZoneId.of("Europe/Athens");
+  // MV38 collector "ts" (Java Date.toString), e.g. "Tue Oct 13 10:43:24 UTC 2026".
+  private static final DateTimeFormatter MV38_COLLECTOR_TS_FMT =
+      DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss zzz yyyy", Locale.US);
 
   public UnifiedEventMapper(ObjectProvider<Mv36NeEnrichmentService> enrichmentProvider) {
     this.mv36NeEnrichmentService = enrichmentProvider.getIfAvailable();
@@ -479,10 +484,10 @@ public class UnifiedEventMapper {
   //   faultId         <- resourceState
   //   serialNo        <- alarmId   (stable across raise and clear)
   //   type            <- kind=snapshot -> FAULT_SYNC
-  //                      kind=event    -> alarmState: on -> FAULT, clr/deleted/cleared/off -> CLEAR
+  //                      kind=event    -> alarmState: on -> FAULT, clr/cleared/off -> CLEAR, deleted -> PURGE
   //                                       (any other state with a clearTime -> CLEAR)
   //                      kind=snapshot_start / snapshot_end -> SYNC_START / SYNC_END marker
-  //   timestamp       <- raisingTime (FAULT, FAULT_SYNC) / clearTime (CLEAR)
+  //   timestamp       <- raisingTime (FAULT, FAULT_SYNC) / clearTime (CLEAR) / collector ts (PURGE)
   // ============================================================================================
 
   private static void applyMv38Mapping(
@@ -521,11 +526,17 @@ public class UnifiedEventMapper {
     }
 
     ue.setType(type);
-    ue.setSeverity(type == EventType.CLEAR ? Severity.CLEARED : mapSeverity(getText(src, "severity")));
+    boolean gone = type == EventType.CLEAR || type == EventType.PURGE;
+    ue.setSeverity(gone ? Severity.CLEARED : mapSeverity(getText(src, "severity")));
 
     Long raisedMs  = mv38TimeToEpochMs(getText(src, "raisingTime"));
     Long clearedMs = mv38TimeToEpochMs(getText(src, "clearTime"));
-    Long tsMs = type == EventType.CLEAR ? firstNonNull(clearedMs, raisedMs) : raisedMs;
+    Long tsMs = switch (type) {
+      case CLEAR -> firstNonNull(clearedMs, raisedMs);
+      // The record carries no deletion time: use when the collector received it.
+      case PURGE -> firstNonNull(mv38CollectorTsToEpochMs(getText(src, "ts")), firstNonNull(clearedMs, raisedMs));
+      default -> raisedMs;
+    };
     ue.setTimestamp(parseEventTime(tsMs, eventTimeFromCtx));
 
     ue.setSerialNo(alarmId);
@@ -584,7 +595,8 @@ public class UnifiedEventMapper {
   private static EventType mapMv38Type(String alarmState) {
     return switch (normalize(alarmState)) {
       case "on" -> EventType.FAULT;
-      case "clr", "deleted", "cleared", "clear", "off" -> EventType.CLEAR;
+      case "clr", "cleared", "clear", "off" -> EventType.CLEAR;
+      case "deleted" -> EventType.PURGE;
       default -> EventType.UNKNOWN;
     };
   }
@@ -603,6 +615,19 @@ public class UnifiedEventMapper {
     try {
       LocalDateTime ldt = LocalDateTime.parse(s.substring(0, 14), MV38_TS_FMT);
       return ldt.atZone(MV38_ZONE).toInstant().toEpochMilli();
+    } catch (Exception ignore) {
+      return null;
+    }
+  }
+
+  private static Long mv38CollectorTsToEpochMs(String value) {
+    String s = clean(value);
+    if (s == null) {
+      return null;
+    }
+
+    try {
+      return ZonedDateTime.parse(s, MV38_COLLECTOR_TS_FMT).toInstant().toEpochMilli();
     } catch (Exception ignore) {
       return null;
     }
