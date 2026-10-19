@@ -28,6 +28,7 @@ import gr.ote.atlas.events.enums.Severity;
 import gr.ote.atlas.events.models.EnrichedData;
 import gr.ote.atlas.events.models.UnifiedEvent;
 import gr.ote.rdnoc.alarm.mv36.enrich.Mv36NeEnrichmentService;
+import gr.ote.rdnoc.alarm.mv36.mapper.Mv36NeNames;
 import gr.ote.rdnoc.alarm.mv36.model.Mv36NetworkElement;
 import gr.ote.rdnoc.alarm.service.pipeline.TransformContext;
 import tools.jackson.databind.JsonNode;
@@ -773,7 +774,10 @@ public class UnifiedEventMapper {
 
     ue.setEmsDomain(parseEnumOrDefault(EMSDomain.class, emsDomainRaw, EMSDomain.UNKNOWN));
 
-    ue.setNeName(clean(effectiveNeName));
+    // neName carries the ".N" suffix of the unique name; alarmIdentifier keeps the plain name.
+    ue.setNeName(clean(firstNonBlank(
+        Mv36NeNames.withUniqueNameSuffix(mv36NeName, firstNonBlank(mv36NeUniqueName, neUniqueName)),
+        effectiveNeName)));
     ue.setSerialNo(clean(serial));
     ue.setFaultId(clean(alarmStr));
 
@@ -785,8 +789,16 @@ public class UnifiedEventMapper {
 
     ue.setEnrichedData(buildMv36EnrichedData(effectiveNeName));
 
-    ue.setSeverity(mapMv36Severity(sevCode));
-    ue.setType(mapMv36Type(sevCode));
+    // MV36-PFM2-MIB (ServiceOn EM PFM-SNMP v16.1): mv36AlarmNotification[Verbose] reports an alarm
+    // "raised or ceased"; the cease keeps the original severity and sets mv36AlarmPhysicalState
+    // to off(2) or sparkling-off(4) (on(1) / sparkling-on(3) = raised). Severity cleared(1) kept too.
+    Integer physicalState = findFieldInt(fields, "mv36AlarmPhysicalState");
+    boolean cleared = Integer.valueOf(1).equals(sevCode)
+        || Integer.valueOf(2).equals(physicalState)
+        || Integer.valueOf(4).equals(physicalState);
+
+    ue.setSeverity(cleared ? Severity.CLEARED : mapMv36Severity(sevCode));
+    ue.setType(cleared ? EventType.CLEAR : mapMv36Type(sevCode));
 
     if (ue.getSourceEvent() instanceof TelegrafGenericEvent t && t.getFields() != null) {
       Map<String, String> srcFields = t.getFields();

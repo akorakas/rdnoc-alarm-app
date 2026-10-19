@@ -111,7 +111,12 @@ public class Mv36ActiveAlarmMapper {
 
     ue.setSerialNo(clean(alarm.getMv36AlarmId()));
     ue.setFaultId(faultId);
-    ue.setNeName(neName);
+    // neName carries the ".N" suffix of the unique name; alarmIdentifier keeps the plain name.
+    ue.setNeName(firstNonBlank(
+        Mv36NeNames.withUniqueNameSuffix(
+            mv36NeName,
+            firstNonBlank(mv36NeUniqueName, clean(alarm.getMv36AlarmStrNeUniqueName()))),
+        neName));
     ue.setNeEquipment(neEquipment != null ? neEquipment : "");
     ue.setAlarmIdentifier(firstNonBlank(identifier, faultId, alarm.getMv36AlarmId()));
 
